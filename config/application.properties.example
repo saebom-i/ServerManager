@@ -1,0 +1,5 @@
+# Copy to config/application.properties. Keep blank until your nginx HTTPS route is ready.
+server-manager.public-origin=
+# Default stays local. Docker nginx may need a host-reachable binding after the URL is set.
+server.address=127.0.0.1
+server.port=8787

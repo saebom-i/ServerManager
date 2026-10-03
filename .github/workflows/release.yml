@@ -1,0 +1,47 @@
+name: Signed macOS release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Validate release version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then test "$GITHUB_REF_NAME" = "v$(cat VERSION)"; fi
+      - run: npm ci --prefix frontend && npm run build --prefix frontend
+      - run: ./gradlew test bootJar --no-daemon
+      - run: python3 scripts/package-macos.py
+      - name: Sign update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          umask 077
+          test -n "$UPDATE_SIGNING_KEY"
+          export UPDATE_SIGNING_KEY_FILE="$RUNNER_TEMP/update-key.der"
+          python3 -c 'import os,base64,pathlib; pathlib.Path(os.environ["UPDATE_SIGNING_KEY_FILE"]).write_bytes(base64.b64decode(os.environ["UPDATE_SIGNING_KEY"],validate=True))'
+          python3 scripts/prepare-release.py
+          rm -f "$UPDATE_SIGNING_KEY_FILE"
+      - name: Publish immutable version assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(cat VERSION)"
+          if gh release view "v$version" >/dev/null 2>&1; then echo "Release already published; preserving existing assets."; exit 0; fi
+          gh release create "v$version" "dist/ServerManager-$version-universal.pkg" "dist/server-manager-$version.jar" dist/update.properties dist/update.sig dist/SHA256SUMS --verify-tag --title "Server Manager $version" --notes "Signed automatic update and universal macOS installer. See README and INSTALL.md for setup."

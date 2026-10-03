@@ -1,0 +1,10 @@
+#!/bin/bash
+# GUI installs offer the profile picker in the logged-in user's session.
+# Headless installs defer this choice to the first app launch.
+set -u
+console_user=$(/usr/bin/stat -f%Su /dev/console)
+if [ "$console_user" != root ] && [ "$console_user" != loginwindow ] && [ -n "$console_user" ]; then
+ console_uid=$(/usr/bin/id -u "$console_user")
+ /bin/launchctl asuser "$console_uid" /usr/bin/sudo -u "$console_user" /usr/bin/open -g '/Applications/Server Manager.app' --args --configure || true
+fi
+exit 0

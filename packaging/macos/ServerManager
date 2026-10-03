@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+app_dir="$(cd "$(dirname "$0")/../.." && pwd)"
+export SERVER_MANAGER_APP_PATH="$app_dir"
+case "$(uname -m)" in
+ arm64) runtime_arch=aarch64 ;;
+ x86_64) runtime_arch=x64 ;;
+ *) echo '지원하지 않는 Mac CPU입니다.' >&2; exit 1 ;;
+esac
+exec "$app_dir/Contents/Resources/runtimes/$runtime_arch/Contents/Home/bin/java" -jar "$app_dir/Contents/Resources/bootstrap.jar" "$@"
