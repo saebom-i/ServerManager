@@ -11,6 +11,8 @@ public class RunnerSetupTest {
         try {body.run();throw new AssertionError("Accepted "+name);} catch(java.io.IOException|IllegalArgumentException|OverlappingFileLockException expected) {}
     }
     public static void main(String[] args)throws Exception {
+        System.setOut(new java.io.PrintStream(System.out,true,java.nio.charset.StandardCharsets.UTF_8));
+        System.setErr(new java.io.PrintStream(System.err,true,java.nio.charset.StandardCharsets.UTF_8));
         for(String bad:List.of("http://example.com","https://a/b","https://u:secret@a","https://a?x=y","https://a/#runners","https://a:0","https://a:99999","file:///tmp/a")) rejects(()->RunnerSetup.origin(bad),bad);
         check(RunnerSetup.origin(" https://server.example.com:8443/ ").equals("https://server.example.com:8443"),"origin normalization");
         rejects(()->RunnerSetup.Options.parse(new String[]{"--code-stdin"}),"stdin without origin");

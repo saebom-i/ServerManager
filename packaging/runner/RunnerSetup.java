@@ -226,6 +226,7 @@ public final class RunnerSetup {
                       $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
                       Register-ScheduledTask -TaskName $env:SM_SETUP_TASK -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
                     }
+                    exit 0
                     """;
                 runPowerShell(script,target,auto,label);
             } else {
