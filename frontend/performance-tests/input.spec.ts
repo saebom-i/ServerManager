@@ -15,6 +15,8 @@ test('typing stays responsive with a large file list and audit history',async({p
   else if(path.endsWith('/event-page'))result={events:[],hasOlder:false};
   else if(path==='/api/admin/discord')result={config:{enabled:false,grants:[],alerts:[]},revision:0,tokenConfigured:false};
   else if(path==='/api/admin/discord/status')result={state:'OFF',message:'꺼짐',inviteUrl:null,guilds:[]};
+  else if(path==='/api/runners')result=[];
+  else if(path==='/api/admin/webdav')result={config:{enabled:false,url:'',username:''},revision:0,passwordConfigured:false};
   else if(path==='/api/admin/audit')result=Array.from({length:300},(_,i)=>({at:'2026-10-12T00:00:00Z',action:'test '+i,status:200}));
   else if(path==='/api/auth/credentials'||path==='/api/admin/users')result=[];
   await route.fulfill({json:result});

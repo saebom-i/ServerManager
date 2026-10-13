@@ -54,8 +54,13 @@ class AuthStore(val directory:Path):CredentialRepository,AutoCloseable {
         Files.writeString(path,value+"\n",StandardOpenOption.CREATE,StandardOpenOption.TRUNCATE_EXISTING)
         Files.setPosixFilePermissions(path,PosixFilePermissions.fromString("rw-------"))
     }
-    @Synchronized fun recoverOwner() {
-        val owner=data.accounts.single { it.owner };owner.enabled=true;owner.epoch++
+    @Synchronized fun recoverOwner(ownerId:String?=null) {
+        val owners=data.accounts.filter { it.owner }
+        val owner=if(ownerId==null) {
+            require(owners.size==1) { "소유자 계정이 여러 개입니다. --recover-owner-id=<계정 ID>를 지정하세요" }
+            owners.single()
+        } else owners.singleOrNull { it.id==ownerId } ?: error("선택한 소유자 계정이 없습니다")
+        owner.enabled=true;owner.epoch++
         data.credentials.removeIf { it.userId==owner.id };issueSetup(owner)
     }
     @Synchronized fun account(id:String):Account?=data.accounts.find { it.id==id }?.let { it.copy(permissions=it.permissions.toMap()) }

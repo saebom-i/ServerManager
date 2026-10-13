@@ -13,10 +13,11 @@ data class CommandRequest(val command: String)
 data class WriteRequest(val path: String, val content: String, val revision: String?=null)
 data class PathRequest(val path: String)
 data class MoveRequest(val from: String,val to: String)
+data class RunnerAssignment(val runnerId:String?)
 
 @RestController
 @RequestMapping("/api")
-class Api(private val manager: ServerManager,private val accounts:AuthStore) {
+class Api(private val manager: ServerManager,private val accounts:AuthStore,private val runners:RunnerRegistry) {
     @GetMapping("/health") fun health()=mapOf("status" to "ok", "mode" to "local", "dataDirectory" to manager.root.toString(), "javaPath" to System.getProperty("java.home")+"/bin/java")
     @GetMapping("/versions") fun versions()=manager.versions()
     @GetMapping("/version-catalog") fun versionCatalog(@RequestParam(defaultValue="false") refresh: Boolean)=manager.versionCatalog(refresh)
@@ -24,10 +25,14 @@ class Api(private val manager: ServerManager,private val accounts:AuthStore) {
     @GetMapping("/instances") fun list(authentication:org.springframework.security.core.Authentication)=manager.list().filter { accounts.allowed(authentication.name,(it["config"] as Instance).id,false) }
     @PostMapping("/instances") fun create(@RequestBody req: CreateRequest)=manager.create(req)
     @PutMapping("/instances/{id}") fun update(@PathVariable id: String,@RequestBody req: CreateRequest)=manager.update(id,req)
+    @PutMapping("/instances/{id}/runner") fun assignRunner(@PathVariable id:String,@RequestBody request:RunnerAssignment,authentication:org.springframework.security.core.Authentication):Map<String,Any?> {
+        if(request.runnerId!=null) require(runners.canAssign(authentication.name,id,request.runnerId)) { "이 서버를 실행할 수 있도록 허용된 실행기를 선택하세요" }
+        return manager.assignRunner(id,request.runnerId)
+    }
     @DeleteMapping("/instances/{id}") fun deleteInstance(@PathVariable id:String,request:jakarta.servlet.http.HttpServletRequest):Map<String,Any> {
         val verified=request.getSession(false)?.getAttribute("sm.verified") as? Long ?: 0
         if(System.currentTimeMillis()-verified>5*60*1000)throw org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.PRECONDITION_REQUIRED,"서버 삭제 전에 패스키로 다시 인증하세요")
-        val result=manager.deleteInstance(id);accounts.removeInstancePermissions(id);return result
+        val result=manager.deleteInstance(id);accounts.removeInstancePermissions(id);runners.removeInstance(id);return result
     }
     @PostMapping("/instances/{id}/install") fun install(@PathVariable id: String): Map<String,String> { manager.install(id); return mapOf("status" to "INSTALLING") }
     @PostMapping("/instances/{id}/start") fun start(@PathVariable id: String)=manager.start(id)

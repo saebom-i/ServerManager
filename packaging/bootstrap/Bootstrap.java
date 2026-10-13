@@ -40,7 +40,7 @@ public class Bootstrap {
   if(chosen==null){Process p=new ProcessBuilder("/usr/bin/osascript",resources.resolve("choose-profile.applescript").toString(),home.resolve("data").toString()).redirectError(ProcessBuilder.Redirect.INHERIT).start();chosen=new String(p.getInputStream().readAllBytes()).trim();if(p.waitFor()!=0||chosen.isEmpty())throw new IOException("프로필 폴더 선택을 취소했습니다.");}
   atomic(home.resolve("data-location.txt"),validateData(chosen).toString()+"\n");
  }
- static void stopChild(){Process p=child;if(p!=null&&p.isAlive()){p.destroy();try{if(!p.waitFor(90,TimeUnit.SECONDS))p.destroyForcibly();}catch(InterruptedException ignored){Thread.currentThread().interrupt();}}}
+ static void stopChild(){Process p=child;if(p!=null&&p.isAlive()){p.destroy();try{p.waitFor();}catch(InterruptedException ignored){Thread.currentThread().interrupt();}}}
  public static void main(String[] argv)throws Exception {
   try { run(argv); } catch(Exception e) { System.err.println(e.getMessage());if(!List.of(argv).contains("--service"))new ProcessBuilder("/usr/bin/osascript","-e","on run argv\ndisplay alert \"Server Manager\" message (item 1 of argv)\nend run",e.getMessage()==null?"앱 실행 실패":e.getMessage()).start().waitFor();System.exit(1); }
  }

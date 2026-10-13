@@ -75,7 +75,7 @@ class RequestGuard(private val settings:SecuritySettings,private val token:Strin
         val origin=req.getHeader("Origin")
         if(unsafe && origin!=null && origin!=settings.origin) { reject(res,403,"허용되지 않은 요청 출처입니다");return }
         if(unsafe && req.getHeader("Sec-Fetch-Site")=="cross-site") { reject(res,403,"다른 사이트에서의 요청은 허용하지 않습니다");return }
-        if(req.requestURI.startsWith("/api/auth/") && unsafe && !allowed(client)) { res.setHeader("Retry-After","60");reject(res,429,"시도가 너무 많습니다. 1분 후 다시 시도하세요");return }
+        if((req.requestURI.startsWith("/api/auth/") || req.requestURI=="/api/runners/pair") && unsafe && !allowed(client)) { res.setHeader("Retry-After","60");reject(res,429,"시도가 너무 많습니다. 1분 후 다시 시도하세요");return }
         try { chain.doFilter(req,res) } finally {
             if(unsafe && req.requestURI.startsWith("/api/")) {
                 val actor=req.getSession(false)?.getAttribute("sm.user")?.toString() ?: "anonymous"
@@ -112,14 +112,14 @@ class SecurityConfig {
         val tokenFile=manager.root.resolve("security/proxy-token.txt")
         if(!tokenFile.exists()) { val bytes=ByteArray(32);SecureRandom().nextBytes(bytes);Files.writeString(tokenFile,Base64.getUrlEncoder().withoutPadding().encodeToString(bytes));Files.setPosixFilePermissions(tokenFile,PosixFilePermissions.fromString("rw-------")) }
         val token=tokenFile.readText().trim();require(token.length>=32)
-        http.csrf { it.csrfTokenRepository(csrf).csrfTokenRequestHandler(CsrfTokenRequestAttributeHandler()) }
+        http.csrf { it.csrfTokenRepository(csrf).csrfTokenRequestHandler(CsrfTokenRequestAttributeHandler()).ignoringRequestMatchers("/api/runners/pair","/api/runners/transfer/**") }
         http.securityContext { it.securityContextRepository(contexts) }
         http.requestCache { it.disable() }
         http.formLogin { it.disable() };http.httpBasic { it.disable() };http.logout { it.disable() }
         http.exceptionHandling { it.authenticationEntryPoint { _,res,_->res.status=401;res.contentType="application/json";res.characterEncoding="UTF-8";res.writer.write("{\"message\":\"로그인이 필요합니다\"}") };it.accessDeniedHandler { _,res,_->res.status=403;res.contentType="application/json";res.characterEncoding="UTF-8";res.writer.write("{\"message\":\"권한이 없거나 요청 검증에 실패했습니다\"}") } }
         http.headers { it.contentSecurityPolicy { c->c.policyDirectives("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'") };it.frameOptions { f->f.deny() };it.referrerPolicy { p->p.policy(org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER) };if(settings.secure)it.httpStrictTransportSecurity { h->h.requestMatcher { true }.includeSubDomains(false).maxAgeInSeconds(31536000) } }
         http.authorizeHttpRequests { auth->
-            auth.requestMatchers("/","/index.html","/assets/**","/favicon.ico","/api/auth/session","/api/auth/login/**","/api/auth/register/**").permitAll()
+            auth.requestMatchers("/","/index.html","/assets/**","/favicon.ico","/api/auth/session","/api/auth/login/**","/api/auth/register/**","/api/runners/pair","/api/runners/connect","/api/runners/transfer/**").permitAll()
             auth.requestMatchers("/api/admin/**").access { authentication,_->AuthorizationDecision(store.account(authentication.get().name)?.let { it.owner && it.enabled }==true) }
             auth.requestMatchers("/api/instances/**").access { authentication,ctx->
                 val user=store.account(authentication.get().name)

@@ -10,6 +10,7 @@ repositories { mavenCentral() }
 kotlin { jvmToolchain(21) }
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.boot:spring-boot-starter-websocket")
     implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("com.yubico:webauthn-server-core:2.10.0")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")

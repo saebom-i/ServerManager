@@ -2,8 +2,8 @@
 
 1. Update `VERSION` using `major.minor.patch` for stable or `major.minor.patch-beta.N` for BETA. BETA tags must be GitHub prereleases with `--latest=false`.
 2. Run frontend build, `./gradlew test bootJar`, and `python3 scripts/test-bootstrap.py` after packaging.
-3. Build with `python3 scripts/package-macos.py` and sign with `python3 scripts/prepare-release.py`.
-4. Publish the matching PKG, JAR, `update.properties`, `update.sig`, and `SHA256SUMS` together under tag `v<version>`.
+3. Build with `python3 scripts/package-macos.py` then `python3 scripts/package-runner.py`, and sign with `python3 scripts/prepare-release.py`.
+4. Publish the matching manager PKG, Mac and Windows runner ZIPs, JAR, `update.properties`, `update.sig`, and `SHA256SUMS` together under tag `v<version>`.
 5. Never replace published version assets; issue a higher version for fixes.
 
 `.release-keys/private.der` is a release-only Ed25519 private key. Never commit it, package it, or send it to issue reports. The public key in `src/main/resources/update-public-key.der` pins the update publisher. Back up the private key privately. Key rotation requires a separately distributed installer unless a future trusted key-rotation protocol is added.

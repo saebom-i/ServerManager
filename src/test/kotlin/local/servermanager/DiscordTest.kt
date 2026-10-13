@@ -24,6 +24,20 @@ class DiscordTest {
         assertTrue(DiscordAccess.allowed(c,guild,setOf("323456789012345678"),"b"))
         assertFalse(DiscordAccess.allowed(c,guild,setOf("323456789012345678"),"b",true))
         assertFalse(DiscordAccess.allowed(c.copy(enabled=false),guild,setOf(role),"a",true))
+        assertFalse(DiscordAccess.allowed(c,guild,setOf(role),"a","stop"))
+        assertFalse(DiscordAccess.allowed(c,guild,setOf(role),"a","restart"))
+        val elevated=c.copy(superAdmins=listOf(DiscordSuperAdmin(guild,"423456789012345678")))
+        assertTrue(DiscordAccess.allowed(elevated,guild,setOf("423456789012345678"),"any-server","restart"))
+        assertFalse(DiscordAccess.allowed(elevated,"923456789012345678",setOf("423456789012345678"),"a","start"))
+    }
+    @Test fun `panel IDs persist without log text and are scoped by route`() {
+        val route=DiscordAlertRoute(guild,"523456789012345678","a",panel=true)
+        val key=DiscordPanelStore.key(route)
+        val store=DiscordPanelStore(temp.resolve("panels"))
+        store.change(key) { it.copy(panelId="123",errorIds=listOf("456")) }
+        assertEquals("123",DiscordPanelStore(temp.resolve("panels")).get(key).panelId)
+        assertTrue(DiscordPanelStore(temp.resolve("panels")).get(DiscordPanelStore.key(route.copy(instanceId="b"))).errorIds.isEmpty())
+        assertFalse(temp.resolve("panels/panel-messages.json").readText().contains("error detected"))
     }
     @Test fun `token encrypted private persisted masked and removable with optimistic revision`() {
         val store=DiscordSettingsStore(temp)
@@ -89,6 +103,25 @@ class DiscordTest {
             bot.save(DiscordSave(DiscordConfig(),1))
             assertContains(bot.execute(guild,setOf(role),"u","three","a","start"),"권한이 없습니다")
             verify(manager,times(1)).start("a")
+        } finally { bot.close() }
+    }
+    @Test fun `stop and restart use fresh action permissions and never force stop`() {
+        val privileged=config().copy(grants=listOf(DiscordGrant(guild,role,"a",canStart=true,canStop=true,canRestart=true)))
+        DiscordSettingsStore(temp.resolve("security/discord")).save(DiscordSave(privileged,0,token)) { true }
+        val manager=mock(ServerManager::class.java)
+        `when`(manager.root).thenReturn(temp)
+        `when`(manager.onSignal(any<(ServerSignal)->Unit>() ?: {})).thenReturn(AutoCloseable {})
+        `when`(manager.instance("a")).thenReturn(Instance("a","서버",loaderVersion="21.1.252",port=25565,memoryMb=512,javaPath="java"))
+        `when`(manager.view("a")).thenReturn(mapOf("state" to "RUNNING"))
+        val bot=DiscordBot(manager,AuditLog(temp.resolve("audit.jsonl")),DesktopLifecycle(manager,mock(org.springframework.context.ConfigurableApplicationContext::class.java)))
+        try {
+            assertContains(bot.execute(guild,emptySet(),"u","deny-stop","a","stop"),"권한이 없습니다")
+            assertContains(bot.execute(guild,setOf(role),"u","ok-stop","a","stop"),"정상 종료")
+            assertContains(bot.execute(guild,setOf(role),"u","ok-restart","a","restart"),"재시작")
+            verify(manager,times(1)).stop("a",false)
+            verify(manager,times(1)).restart("a")
+            bot.save(DiscordSave(privileged.copy(enabled=false,grants=emptyList()),1))
+            assertContains(bot.execute(guild,setOf(role),"u","revoked","a","restart"),"권한이 없습니다")
         } finally { bot.close() }
     }
 }

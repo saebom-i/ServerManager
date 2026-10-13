@@ -19,12 +19,19 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import kotlin.io.path.*
 
-data class Instance(val id: String, var name: String, val loader: String = "NeoForge", val minecraft: String = "1.21.1", var loaderVersion: String, var port: Int, var memoryMb: Int, var javaPath: String)
+data class Instance(val id: String, var name: String, val loader: String = "NeoForge", val minecraft: String = "1.21.1", var loaderVersion: String, var port: Int, var memoryMb: Int, var javaPath: String, var runnerId:String?=null)
 data class CreateRequest(val name: String, val loaderVersion: String, val port: Int = 25565, val memoryMb: Int = 2048, val javaPath: String = System.getProperty("java.home") + "/bin/java")
 data class Event(val seq: Long, val time: String, val kind: String, val text: String)
 data class FileEntry(val name: String, val path: String, val directory: Boolean, val size: Long)
 data class MemoryCapacity(val totalMb: Long, val freeMb: Long, val reservedMb: Long, val maxHeapMb: Long, val committedHeapMb: Long, val startableHeapMb: Long)
 data class ServerSignal(val instanceId:String, val kind:String, val detail:String)
+interface RemoteController {
+    fun start(instance:Instance)
+    fun stop(instance:Instance)
+    fun restart(instance:Instance)
+    fun command(instance:Instance,value:String)
+    fun completed(instance:Instance) {}
+}
 
 class RuntimeState {
     @Volatile var process: Process? = null
@@ -32,6 +39,13 @@ class RuntimeState {
     var seq = 0L
     val events = ArrayDeque<Event>()
     @Volatile var resources: ResourceSample? = null
+    @Volatile var players: PlayerSample? = null
+    @Volatile var playerQueryInProgress = false
+    @Volatile var remoteStopRequested = false
+    @Volatile var remoteRestartRequested = false
+    @Volatile var remoteWorkerReady = false
+    @Volatile var remoteCloudReady = false
+    @Volatile var remotePid:Long? = null
     fun event(kind: String, text: String) = synchronized(this) {
         events.addLast(Event(++seq, Instant.now().toString(), kind, text))
         while(events.size > 10000) events.removeFirst()
@@ -48,23 +62,40 @@ class ServerManager {
     private val http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).connectTimeout(java.time.Duration.ofSeconds(20)).build()
     private val catalog by lazy { VersionCatalog(root.resolve("neoforge-versions.json")) }
     private val metrics = ProcessMetrics()
+    private val query = MinecraftQuery()
     private val signalListeners = java.util.concurrent.CopyOnWriteArrayList<(ServerSignal)->Unit>()
+    @Volatile private var remoteController:RemoteController?=null
+    fun attachRemoteController(controller:RemoteController) { remoteController=controller }
     fun onSignal(listener:(ServerSignal)->Unit):AutoCloseable { signalListeners.add(listener); return AutoCloseable { signalListeners.remove(listener) } }
     private fun signal(id:String,kind:String,detail:String) { signalListeners.forEach { listener -> runCatching { listener(ServerSignal(id,kind,detail)) } } }
     @Scheduled(fixedDelay = 2000) fun sampleResources() {
         val pids = mutableSetOf<Long>()
-        runtimes.values.forEach { r ->
+        runtimes.forEach { (id,r) ->
+            if(instances[id]?.runnerId!=null) return@forEach
             val process = r.process
             r.resources = if (process?.isAlive == true) { pids.add(process.pid()); metrics.sample(process.toHandle()) } else null
         }
         metrics.retain(pids)
+    }
+    @Scheduled(fixedDelay = 10000) fun samplePlayers() {
+        instances.values.forEach { i ->
+            val r=runtimes[i.id] ?: return@forEach
+            if(i.runnerId!=null) return@forEach
+            if(r.process?.isAlive!=true || r.state!="RUNNING") { r.players=null;return@forEach }
+            if(r.playerQueryInProgress) return@forEach
+            r.playerQueryInProgress=true
+            workers.submit {
+                try { r.players=query.players(i.port) }
+                finally { r.playerQueryInProgress=false }
+            }
+        }
     }
     init {
         root.createDirectories()
         Files.list(root).use { dirs -> dirs.filter { it.resolve("instance.json").exists() }.forEach {
             val instance: Instance = mapper.readValue(it.resolve("instance.json").readText())
             instances[instance.id] = instance
-            runtimes[instance.id] = RuntimeState().apply { state = when { root.resolve(instance.id).resolve("import.pending").exists() -> "IMPORT_FAILED"; root.resolve(instance.id).resolve("installed.ok").exists() -> "STOPPED"; else -> "NEW" } }
+            runtimes[instance.id] = RuntimeState().apply { state = when { root.resolve(instance.id).resolve("remote-lease").exists() -> "UNKNOWN"; root.resolve(instance.id).resolve("import.pending").exists() -> "IMPORT_FAILED"; root.resolve(instance.id).resolve("installed.ok").exists() -> "STOPPED"; else -> "NEW" } }
         } }
     }
     fun instance(id: String): Instance = instances[id] ?: throw IllegalArgumentException("인스턴스를 찾을 수 없습니다")
@@ -87,7 +118,7 @@ class ServerManager {
     }
     fun view(id: String): Map<String, Any?> {
         val i = instance(id); val r = runtime(id)
-        return synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to r.process?.takeIf { it.isAlive }?.pid(), "resources" to r.resources?.takeIf { r.process?.isAlive == true && it.pid == r.process?.pid() }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id)) }
+        return synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id)) }
     }
     private fun validate(req: CreateRequest) {
         require(req.name.isNotBlank() && req.name.length <= 80) { "이름은 1~80자로 입력하세요" }
@@ -116,6 +147,16 @@ class ServerManager {
         }
         return view(id)
     }
+    @Synchronized fun assignRunner(id:String,runnerId:String?):Map<String,Any?> {
+        val r=runtime(id)
+        synchronized(r) {
+            checkIdle(r)
+            check(r.state in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED")) { "서버가 완전히 종료된 뒤 실행기를 변경하세요" }
+            instance(id).runnerId=runnerId
+            save(instance(id))
+        }
+        return view(id)
+    }
     @Synchronized fun deleteInstance(id:String):Map<String,Any> {
         val r=runtime(id)
         synchronized(r) {
@@ -132,7 +173,7 @@ class ServerManager {
         val path=serverDir(i.id).resolve("server.properties")
         val props=Properties(); if(path.exists()) path.inputStream().use { props.load(it) }
         props.setProperty("server-ip", "127.0.0.1"); props.setProperty("server-port", i.port.toString())
-        props.setProperty("enable-rcon", "false"); props.setProperty("enable-query", "false")
+        props.setProperty("enable-rcon", "false"); props.setProperty("enable-query", "true"); props.setProperty("query.port",i.port.toString())
         if(!props.containsKey("online-mode")) props.setProperty("online-mode", "true")
         if(!props.containsKey("view-distance")) props.setProperty("view-distance", "6")
         path.outputStream().use { props.store(it, "Local Server Manager") }
@@ -175,11 +216,19 @@ class ServerManager {
             } catch(e: Exception) { synchronized(r) { r.process=null; r.state="FAILED"; r.event("error", e.message ?: "설치 실패") } }
         }
     }
-    private fun checkIdle(r: RuntimeState) { check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","STOPPING","IMPORTING")) { "서버가 실행 중이거나 작업 중입니다" } }
+    private fun checkIdle(r: RuntimeState) { check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","RUNNING","STOPPING","IMPORTING","TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN")) { "서버가 실행 중이거나 작업 중입니다" } }
     @Synchronized fun start(id: String) {
         val i=instance(id); val r=runtime(id)
         synchronized(r) {
             checkIdle(r); require(r.state != "IMPORT_FAILED") { "실패한 팩은 시작할 수 없습니다. 원본 mrpack에서 다시 가져오세요" }; require(eulaAccepted(id)) { "Minecraft EULA에 먼저 동의하세요" }
+            if(i.runnerId!=null) {
+                val controller=remoteController ?: error("원격 실행기 연결 기능을 사용할 수 없습니다")
+                root.resolve(id).resolve("remote-lease").writeText(i.runnerId!!)
+                r.remoteStopRequested=false;r.remoteRestartRequested=false;r.state="TRANSFERRING";r.players=null;r.resources=null
+                try { controller.start(i.copy()) } catch(e:Exception) { root.resolve(id).resolve("remote-lease").deleteIfExists();r.state="STOPPED";throw e }
+                r.event("system","실행기 ${i.runnerId}로 서버 데이터를 인계하고 있습니다")
+                return
+            }
             val capacity=capacity(id)
             require(i.memoryMb.toLong() in 512L..capacity.startableHeapMb) { "시작 가능한 최대 힙은 ${capacity.startableHeapMb} MiB입니다. 다른 실행 인스턴스가 ${capacity.committedHeapMb} MiB를 예약하고 있습니다" }
             val args=serverDir(id).resolve("libraries/net/neoforged/neoforge/${i.loaderVersion}/unix_args.txt")
@@ -187,7 +236,7 @@ class ServerManager {
             ServerSocket(i.port,1,InetAddress.getByName("127.0.0.1")).use { }
             writeProperties(i)
             val p=ProcessBuilder(i.javaPath,"-Xms512M","-Xmx${i.memoryMb}M","@${args}","nogui").directory(serverDir(id).toFile()).redirectErrorStream(true).start()
-            r.process=p; r.state="STARTING"; r.event("system","서버 시작 · 127.0.0.1:${i.port} · PID ${p.pid()}")
+            r.process=p; r.state="STARTING"; r.players=null; r.event("system","서버 시작 · 127.0.0.1:${i.port} · PID ${p.pid()}")
             workers.submit {
                 consume(id,p); val code=p.waitFor()
                 val requested=synchronized(r) { val stopped=r.state=="STOPPING"; if(r.process===p) { r.process=null; r.state=if(code==0) "STOPPED" else "FAILED" }; r.event("system","서버 종료 (exit $code)"); stopped }
@@ -213,23 +262,87 @@ class ServerManager {
         require(command.isNotBlank() && command.length<=4096 && !command.contains('\n') && !command.contains('\r')) { "한 줄 명령을 입력하세요" }
         val r=runtime(id); synchronized(r) {
             check(r.state in listOf("RUNNING","STARTING")) { "실행 중인 서버가 없습니다" }
+            val instance=instance(id)
+            if(instance.runnerId!=null) {
+                val controller=remoteController ?: error("원격 실행기 연결 기능을 사용할 수 없습니다")
+                if(command.trim()=="stop") { controller.stop(instance);r.remoteStopRequested=true;r.state="STOPPING" }
+                else controller.command(instance,command)
+                r.event("input",command)
+                return
+            }
             val p=r.process ?: error("프로세스가 없습니다")
             p.outputStream.write((command+"\n").toByteArray()); p.outputStream.flush(); r.event("input",command)
             if(command.trim()=="stop") r.state="STOPPING"
         }
     }
     fun stop(id: String,force: Boolean) { val r=runtime(id); synchronized(r) {
+        if(instance(id).runnerId!=null) { require(!force) { "원격 서버는 정상 종료를 사용하세요" };command(id,"stop");return }
         if(force) { val p=r.process ?: error("프로세스가 없습니다"); r.state="STOPPING"; p.descendants().forEach { it.destroyForcibly() }; p.destroyForcibly(); r.event("system","강제 종료 요청") }
         else command(id,"stop")
     } }
     fun restart(id: String) {
         val r=runtime(id)
+        if(instance(id).runnerId!=null) {
+            synchronized(r) { check(r.state=="RUNNING") { "실행 중인 서버만 재시작할 수 있습니다" };remoteController?.restart(instance(id)) ?: error("실행기 연결이 없습니다");r.remoteStopRequested=true;r.remoteRestartRequested=true;r.state="STOPPING";r.event("system","원격 서버 재시작 요청") }
+            return
+        }
         val old=synchronized(r) { check(r.state=="RUNNING") { "실행 중인 서버만 재시작할 수 있습니다" }; val p=r.process!!; command(id,"stop"); p }
         workers.submit {
             if(!old.waitFor(60,java.util.concurrent.TimeUnit.SECONDS)) { r.event("error","정상 종료가 지연되어 재시작을 취소했습니다. 상태를 확인하세요."); return@submit }
             synchronized(r) { if(r.process===old) { r.process=null; r.state="STOPPED" } }
             runCatching { start(id) }.onFailure { r.event("error","재시작 실패: ${it.message}") }
         }
+    }
+    fun remoteState(id:String,runnerId:String,state:String,detail:String?=null) {
+        val i=instance(id);if(i.runnerId!=runnerId || state !in setOf("STARTING","RUNNING","STOPPING","SYNCING","SYNC_FAILED","UNKNOWN")) return
+        val r=runtime(id)
+        synchronized(r) { r.state=state;detail?.take(1000)?.let { r.event("system",it) } }
+    }
+    fun remoteWorkerReady(id:String,runnerId:String) {
+        if(instance(id).runnerId!=runnerId)return
+        val r=runtime(id)
+        synchronized(r) { if(r.state=="STOPPED") r.remoteWorkerReady=true }
+        resumeRemoteRestart(id)
+    }
+    fun remoteCloudReady(id:String) {
+        val r=runtime(id)
+        synchronized(r) { if(r.state=="STOPPED") r.remoteCloudReady=true }
+        resumeRemoteRestart(id)
+    }
+    private fun resumeRemoteRestart(id:String) {
+        val r=runtime(id)
+        val restart=synchronized(r) { if(r.remoteRestartRequested && r.remoteWorkerReady && r.remoteCloudReady && r.state=="STOPPED") { r.remoteRestartRequested=false;true } else false }
+        if(restart) workers.submit { runCatching { start(id) }.onFailure { synchronized(r) { r.event("error","원격 서버 재시작 실패: ${it.message}") } } }
+    }
+    fun remoteLog(id:String,runnerId:String,kind:String,line:String) {
+        if(instance(id).runnerId!=runnerId)return
+        val r=runtime(id)
+        synchronized(r) { r.event(if(kind in setOf("error","warn","output")) kind else "output",line.take(4096)) }
+        if(kind=="error") signal(id,"error","원격 서버 로그에서 오류가 감지되었습니다. 관리 웹의 콘솔에서 확인하세요.")
+    }
+    fun remoteMetrics(id:String,runnerId:String,pid:Long?,cpu:Double?,rss:Double?,uptime:Long?,playerCount:Int?,names:List<String>?) {
+        if(instance(id).runnerId!=runnerId)return
+        val r=runtime(id)
+        synchronized(r) {
+            if(r.state !in setOf("STARTING","RUNNING","STOPPING")) return
+            r.remotePid=pid?.takeIf { it>0 }
+            r.resources=ResourceSample(r.remotePid ?: 0,cpu?.takeIf { it.isFinite() && it>=0 },rss?.takeIf { it.isFinite() && it>=0 },uptime?.takeIf { it>=0 },Instant.now().toString(),"runner")
+            r.players=playerCount?.takeIf { it in 0..100000 }?.let { PlayerSample(it,names.orEmpty().take(100).map(String::trim).filter { name->name.isNotBlank() && name.length<=32 },Instant.now().toString()) }
+        }
+    }
+    fun remoteDisconnected(runnerId:String) {
+        instances.values.filter { it.runnerId==runnerId }.forEach { i ->
+            val r=runtime(i.id)
+            synchronized(r) { if(r.state in setOf("STARTING","RUNNING","STOPPING","TRANSFERRING","SYNCING")) { r.state="UNKNOWN";r.players=null;r.resources=null;r.remotePid=null;r.event("system","실행기 연결이 끊겨 서버 상태를 확인할 수 없습니다") } }
+        }
+    }
+    fun remoteCommitted(id:String,runnerId:String) {
+        val i=instance(id);require(i.runnerId==runnerId)
+        val r=runtime(id)
+        val requested=synchronized(r) { val value=r.remoteStopRequested;r.remoteStopRequested=false;r.remoteWorkerReady=false;r.remoteCloudReady=false;r.state="STOPPED";r.players=null;r.resources=null;r.remotePid=null;r.event("system","원격 서버 파일 인계를 완료했습니다");value }
+        root.resolve(id).resolve("remote-lease").deleteIfExists()
+        remoteController?.completed(i)
+        signal(id,"stop",if(requested) "종료 요청 후 서버 데이터 인계까지 완료되었습니다." else "서버가 종료되어 데이터 인계를 완료했습니다.")
     }
     fun events(id: String,after: Long): List<Event> { val r=runtime(id); return synchronized(r) { r.events.filter { it.seq>after }.take(2000) } }
     fun eventPage(id:String,before:Long?,after:Long?,limit:Int):Map<String,Any?> {
@@ -270,9 +383,11 @@ class ServerManager {
     fun move(id: String,from: String,to: String) { val r=runtime(id); synchronized(r) { checkIdle(r); val source=path(id,from); val target=path(id,to); require(source!=serverDir(id) && !target.exists()) { "대상 경로를 확인하세요" }; Files.move(source,target) } }
     fun delete(id: String,relative: String) { val r=runtime(id); synchronized(r) { checkIdle(r); val p=path(id,relative); require(p!=serverDir(id)) { "서버 루트는 삭제할 수 없습니다" }; val trash=root.resolve(id).resolve("trash"); trash.createDirectories(); Files.move(p,trash.resolve(UUID.randomUUID().toString()+"-"+p.name)) } }
     @PreDestroy fun shutdown() {
-        runtimes.values.forEach { r -> val process=synchronized(r) { r.process }; process?.takeIf { it.isAlive }?.let { p ->
+        val processes=runtimes.values.mapNotNull { r -> synchronized(r) { r.process } }.filter { it.isAlive }
+        processes.forEach { p ->
             runCatching { p.outputStream.write("stop\n".toByteArray()); p.outputStream.flush() }
-            if(!p.waitFor(20,java.util.concurrent.TimeUnit.SECONDS)) { p.descendants().forEach { it.destroyForcibly() }; p.destroyForcibly() }
-        } }; workers.shutdownNow()
+        }
+        processes.forEach { it.waitFor() }
+        workers.shutdownNow()
     }
 }
