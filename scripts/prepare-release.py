@@ -7,6 +7,6 @@ manifest=f'protocol=1\nversion={version}\nfile={jar.name}\nsize={jar.stat().st_s
 java_home=os.environ.get('JAVA_HOME') or subprocess.check_output(['/usr/libexec/java_home','-v','21'],text=True).strip()
 key=pathlib.Path(os.environ.get('UPDATE_SIGNING_KEY_FILE',root/'.release-keys/private.der'))
 subprocess.run([str(pathlib.Path(java_home)/'bin/java'),str(root/'packaging/bootstrap/SignRelease.java'),str(key),str(dist/'update.properties'),str(dist/'update.sig')],check=True)
-files=[jar,dist/f'ServerManager-{version}-universal.pkg',dist/f'ServerManager-Runner-{version}-mac-universal.zip',dist/f'ServerManager-Runner-{version}-windows-x64.zip',dist/'update.properties',dist/'update.sig']
+files=[jar,dist/f'ServerManager-{version}-universal.pkg',dist/f'ServerManager-Runner-{version}-mac-universal.zip',dist/f'ServerManager-Runner-{version}-windows-x64.zip',dist/f'ServerManager-Runner-UI-{version}-mac-universal.zip',dist/f'ServerManager-Runner-UI-{version}-windows-x64.zip',dist/'update.properties',dist/'update.sig']
 (dist/'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in files))
 print('Release prepared:',version)

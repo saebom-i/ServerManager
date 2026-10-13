@@ -133,8 +133,9 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     private val activity=ConcurrentHashMap<String,AtomicLong>()
     private val query=MinecraftQuery()
     private val metrics=ProcessMetrics()
+    private val folders=RunnerFolders(home)
     private fun instanceRoot(id:String)=home.resolve("instances").resolve(id)
-    private fun serverDir(id:String)=instanceRoot(id).resolve("server")
+    private fun serverDir(id:String)=folders.directory(id)
     private fun dirty(id:String)=instanceRoot(id).resolve("dirty")
     private fun orphanAlive(id:String):Boolean {
         val marker=dirty(id)
@@ -286,8 +287,12 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             configs[id]=instance
             val root=instanceRoot(id).also { it.createDirectories() }
             root.resolve("instance.json").writeText(mapper.writeValueAsString(instance))
+            folders.checkStopped(id)
+            folders.prepareRuntime(id,instance)
             send(RunnerMessage("state",id,"TRANSFERRING",version(),"서버 파일을 받고 있습니다"))
-            pull(id)
+            // Local consent makes the existing folder authoritative until its first stopped upload.
+            // Pulling the newly-created empty central profile here would destroy the original world.
+            if(!folders.initial(id))pull(id)
             startProcess(instance) {spawned=true}
         } catch(e:Exception) {
             val state=if(!spawned && processes[id]?.isAlive!=true && !dirty(id).exists())"START_FAILED" else "SYNC_FAILED"
@@ -299,7 +304,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         check(response.statusCode()==200) { "서버 파일 목록을 받지 못했습니다: HTTP ${response.statusCode()}" }
         val manifest=mapper.readValue<RunnerFileManifest>(response.body())
         val root=instanceRoot(id)
-        val stage=root.resolve("stage-${UUID.randomUUID()}").also { it.createDirectories() }
+        val stage=folders.stage(id)
         try {
             manifest.directories.forEach { FileInventory.safePath(stage,it).createDirectories() }
             val existing=serverDir(id).takeIf { it.exists() }?.let { FileInventory.collect(it).first }.orEmpty()
@@ -321,10 +326,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             }
             val current=serverDir(id)
             if(current.exists()) {
-                val backup=root.resolve("backup-${System.currentTimeMillis()}")
+                val backup=folders.backup(id)
                 Files.move(current,backup,ATOMIC_MOVE)
                 try { Files.move(stage,current,ATOMIC_MOVE) } catch(e:Exception) { Files.move(backup,current,ATOMIC_MOVE);throw e }
             } else Files.move(stage,current,ATOMIC_MOVE)
+            if(folders.custom(id))folders.published(id,manifest)
         } finally { if(stage.exists())stage.toFile().deleteRecursively() }
     }
     private fun startProcess(instance:Instance,onSpawned:()->Unit) {
@@ -334,8 +340,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         val limit=maxOf(0L,os.totalMemorySize/(1024*1024)-maxOf(1024L,os.totalMemorySize/(1024*1024)/10)-current)
         require(instance.memoryMb.toLong() in 512L..limit) { "실행기 메모리가 부족합니다 (최대 $limit MiB)" }
         val java=javaBin()
-        val args=Launchers.arguments(instance,serverDir(id),java,identity.platform=="WINDOWS")
-        Launchers.verifyJava(java,Launchers.requiredJava(instance,serverDir(id)))
+        val args=folders.arguments(id,instance,java,identity.platform=="WINDOWS")
+        Launchers.verifyJava(java,folders.requiredJava(id,instance))
         ServerSocket().use {it.bind(InetSocketAddress("127.0.0.1",instance.port))}
         val properties=serverDir(id).resolve("server.properties")
         val values=Properties();properties.inputStream().use { values.load(it) }
@@ -394,6 +400,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             }
             val done=http("POST","/api/runners/transfer/$id/commit?transferId=${plan.transferId}")
             check(done.statusCode()==200) { "서버 파일 인계 완료 실패: HTTP ${done.statusCode()}" }
+            folders.published(id,manifest)
             dirty(id).deleteIfExists()
             send(RunnerMessage("state",id,"STOPPED",version(),"서버 파일 인계 완료"))
         } catch(e:Exception) { send(RunnerMessage("state",id,"SYNC_FAILED",version(),e.message?.take(300) ?: "서버 파일 인계 실패")) }

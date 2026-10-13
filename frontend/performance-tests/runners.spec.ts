@@ -30,7 +30,11 @@ test('execution selection and registration are visible; server navigation leaves
  await expect(page.getByText('PASSKEY PROTECTED · v0.4.0-beta.4')).toBeVisible();
  await page.getByRole('button',{name:'실행기 등록·관리',exact:true}).click();
  const panel=page.getByRole('region',{name:'서버 실행기',exact:true});
- await expect(panel.getByRole('link',{name:'Mac 실행기 다운로드'})).toHaveAttribute('href',/ServerManager-Runner-0.4.0-beta.4-mac-universal.zip$/);
+ await expect(panel.getByRole('link',{name:'Mac UI 설치판'})).toHaveAttribute('href',/ServerManager-Runner-UI-0.4.0-beta.4-mac-universal.zip$/);
+ await expect(panel.getByRole('link',{name:'Windows UI 설치판'})).toHaveAttribute('href',/ServerManager-Runner-UI-0.4.0-beta.4-windows-x64.zip$/);
+ await panel.getByText('CLI 설치판 · 터미널 사용자',{exact:true}).click();
+ await expect(panel.getByRole('link',{name:'Mac CLI 설치판'})).toHaveAttribute('href',/ServerManager-Runner-0.4.0-beta.4-mac-universal.zip$/);
+ await expect(panel.getByRole('link',{name:'Windows CLI 설치판'})).toHaveAttribute('href',/ServerManager-Runner-0.4.0-beta.4-windows-x64.zip$/);
  await expect(panel.getByText('아직 등록된 실행기가 없습니다.',{exact:false})).toBeVisible();
  await page.getByRole('button',{name:/테스트 서버 NeoForge/}).click();await expect(page.getByLabel('실행 위치',{exact:true})).toBeVisible();
  await page.getByRole('button',{name:'계정과 보안',exact:true}).click();await expect(page.getByRole('heading',{name:'계정과 접근 보안'})).toBeVisible();
@@ -57,4 +61,15 @@ test('viewer can register their device but cannot choose a server execution loca
  await expect(page.getByLabel('실행 위치',{exact:true})).toHaveCount(0);
  await page.getByRole('button',{name:'서버 실행기',exact:true}).click();
  await expect(page.getByLabel('새 실행기 이름')).toBeVisible();
+});
+
+test('existing folder IDs are visible and a new profile can start on its registered runner without reinstalling',async({page})=>{
+ const f=await fixture(page,true);f.setState('NEW');
+ f.setRunners([{id:'r',name:'기존 서버 컴퓨터',platform:'MAC',registeredBy:'user',version:'0.4.0-beta.7',enabled:true,online:true,allowedInstanceIds:['a']}]);
+ await page.goto('/');await expect(page.getByRole('button',{name:'시작',exact:true})).toBeDisabled();
+ await page.getByLabel('실행 위치',{exact:true}).selectOption('r');
+ await expect(page.getByRole('button',{name:'시작',exact:true})).toBeEnabled();
+ await page.getByRole('button',{name:'실행기 등록·관리',exact:true}).click();
+ await page.getByText('기존 마크 서버 폴더 연결하기',{exact:true}).click();
+ await expect(page.getByLabel('테스트 서버 · 서버 ID',{exact:true})).toHaveValue('a');
 });

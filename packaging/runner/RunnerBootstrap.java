@@ -35,7 +35,7 @@ public final class RunnerBootstrap {
  static void run()throws Exception{
   String configured=System.getenv("RUNNER_PACKAGE_HOME");
   packageHome=configured!=null?Path.of(configured).toAbsolutePath().normalize():Path.of(RunnerBootstrap.class.getProtectionDomain().getCodeSource().getLocation().toURI()).toAbsolutePath().getParent();
-  home=Path.of(System.getenv().getOrDefault("SERVER_MANAGER_RUNNER_HOME",System.getProperty("user.home")+"/.servermanager-runner")).toAbsolutePath().normalize();
+  home=Path.of(System.getenv().getOrDefault("SERVER_MANAGER_RUNNER_HOME",text(packageHome.resolve("runner-home.txt"),System.getProperty("user.home")+"/.servermanager-runner"))).toAbsolutePath().normalize();
   updates=home.resolve("updates");Files.createDirectories(updates);Files.createDirectories(home.resolve("logs"));
   bundled=text(packageHome.resolve("version.txt"),"0.0.0");compare(bundled,"0.0.0");
   try(FileChannel channel=FileChannel.open(home.resolve("runner.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE);FileLock lock=channel.tryLock()){

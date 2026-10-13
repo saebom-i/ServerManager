@@ -66,7 +66,48 @@ Java 배포는 [공식 Adoptium API](https://github.com/adoptium/api.adoptium.ne
 
 ## 별도 Mac·Windows 실행기 (BETA)
 
-관리 웹의 왼쪽 **서버 실행기** 메뉴에서 초대 사용자도 패스키 재인증 후 자신의 컴퓨터 등록 코드를 받을 수 있습니다. 코드는 5분 동안 한 번만 유효합니다. 화면에 Mac·Windows 실행기 다운로드와 등록 순서가 표시됩니다. Mac 실행기 ZIP의 `install.command` 또는 Windows x64 실행기 ZIP의 `install.cmd`를 실행하면 새 설치의 등록 단계가 이어집니다. 관리 웹 HTTPS 주소를 입력하면 브라우저의 실행기 페이지가 열리며 발급한 코드를 실행기에 입력합니다. 이미 설치했다면 `pair.command`/`pair.cmd`로 등록을 다시 시작할 수 있습니다. Java 21은 실행기 파일에 포함됩니다. 설치 후 Mac은 LaunchAgent, Windows는 사용자 로그인 작업으로 대기 상태를 시작합니다. 로그인 전 시스템 서비스는 설치하지 않습니다. 무인 설치에서는 `SERVER_MANAGER_SKIP_PAIRING=1`로 등록 입력을 생략할 수 있습니다.
+친구가 서버를 실행할 컴퓨터에 설치하는 프로그램입니다. 관리 웹 설치용 `.pkg`와 별개이며 Java 21을 포함합니다. 관리 웹의 왼쪽 **서버 실행기**에서 플랫폼과 설치 방식을 선택하세요.
+
+| 방식 | Mac Intel·Apple Silicon | Windows x64 |
+| --- | --- | --- |
+| UI 설치판 (추천) | `ServerManager-Runner-UI-<버전>-mac-universal.zip` | `ServerManager-Runner-UI-<버전>-windows-x64.zip` |
+| CLI 설치판 | `ServerManager-Runner-<버전>-mac-universal.zip` | `ServerManager-Runner-<버전>-windows-x64.zip` |
+
+**UI 설치:** ZIP 전체를 풀고 Mac은 **Server Manager Runner Installer.app**, Windows는 **Setup.cmd**를 여세요. 관리 웹 HTTPS 주소를 확인하고 **웹에서 패스키로 등록 코드 발급**을 누릅니다. 초대 사용자도 웹에서 자신의 실행기 이름을 입력해 코드를 발급할 수 있습니다. 5분 안에 설치 창에 코드를 붙여넣고 **설치하고 연결**을 누르세요. **로그인 자동 대기**를 선택할 수 있습니다. 등록 실패 시 설치는 보존되므로 새 코드를 받아 **다시 시도**할 수 있습니다.
+
+**CLI 설치:** 압축을 푼 폴더의 터미널에서 Mac은 `./install.command`, Windows는 `install.cmd`를 실행하세요. 관리 주소와 등록 코드를 순서대로 입력합니다. 코드 입력은 실제 터미널에서 숨깁니다.
+
+```sh
+./install.command --help
+./install.command --manager-url=https://server.example.com --no-autostart
+./install.command --install-only --no-autostart
+```
+
+Windows도 같은 옵션을 `install.cmd` 뒤에 붙입니다. 자동화 시 `--code-stdin --manager-url=https://...`로 코드를 표준 입력에서만 읽을 수 있습니다. 코드를 명령 인수·스크립트·파일에 저장하지 마세요. `--install-only` 또는 기존 `SERVER_MANAGER_SKIP_PAIRING=1`은 등록·현재 실행을 생략하며 나중에 `pair.command`/`pair.cmd`, `run.command`/`run.cmd`로 진행합니다.
+
+두 방식은 동일한 실행기와 등록 정보를 사용합니다. 설치 위치는 Mac `~/Applications/Server Manager Runner`, Windows `%LOCALAPPDATA%\ServerManagerRunner`이며 등록·게임 데이터는 `~/.servermanager-runner`에 보존합니다. 기본 자동 시작은 **사용자 로그인 시** Mac LaunchAgent 또는 Windows 사용자 작업 스케줄러를 사용하며 로그인 전 시스템 서비스는 설치하지 않습니다. 실행 중에는 재설치를 거절하므로 게임 저장·정상 종료와 실행기 종료를 마친 뒤 설치하세요. 설치기가 실행 중인 게임을 강제 종료하지 않습니다.
+
+개발 빌드는 Apple Developer ID 공증 및 Windows Authenticode 서명이 없습니다. OS·조직 보안 정책에 따라 실행 승인이 필요할 수 있습니다. Ed25519 자동 업데이트 서명은 OS 공증과 별도입니다.
+
+### 기존 마크 서버 폴더를 원래 위치에서 사용
+
+1. 관리 웹에서 기존 서버와 **동일한 종류·Minecraft·로더 버전**으로 서버를 생성합니다. 런처 설치는 생략할 수 있습니다.
+2. **서버 실행기 → 기존 마크 서버 폴더 연결하기**에서 해당 서버 ID를 복사합니다.
+3. UI 설치 창에서 **기존 마크 서버 폴더를 원래 위치에서 실행**을 체크하고 서버 ID·폴더를 지정합니다. `server.properties`가 있는 서버 루트 폴더를 고르세요. 일반 폴더나 월드 폴더만 선택하면 거절합니다.
+4. Vanilla·Paper·Fabric의 JAR 이름이 기본값과 다르면 `paper-1.21.1.jar` 같은 **파일 이름만** 입력합니다. NeoForge·Forge는 비워두고, 웹 버전에 맞는 `libraries/.../unix_args.txt` 또는 `win_args.txt`를 사용합니다. 임의 실행 스크립트나 셸 명령은 실행하지 않습니다.
+5. 설치 후 웹에서 서버 사용 허용 → 실행 위치 배정 → 시작합니다. 처음에는 선택한 원래 경로의 파일이 원본입니다. 실행기가 폴더를 다른 곳으로 가져가 실행하지 않습니다.
+
+CLI에서도 같은 기능을 제공합니다. 경로에 공백이 있으면 따옴표로 감싸세요.
+
+```sh
+./install.command --server-id=서버UUID --server-path="/Users/friend/Minecraft/My Server" --server-jar=paper.jar
+# 이미 설치되어 있다면, 실행기를 종료한 뒤 폴더 연결만 변경:
+./install.command --folder-only --server-id=서버UUID --server-path="/Users/friend/Minecraft/My Server"
+```
+
+원래 서버가 실행 중이거나 실행기의 이전 파일 인계가 끝나지 않았으면 등록·시작을 거절합니다. 링크와 서버 폴더 밖의 월드 경로도 거절합니다. `server.properties`·EULA·기존 런타임 메타데이터는 실행기 프로필의 `folder-settings-backups`에 보관합니다. 실행 시 웹에서 설정한 포트와 로컬 수신·Query 설정이 적용됩니다. 첫 종료 후 변경 파일을 관리 서버에 인계하고 다른 실행기로 이동할 수 있습니다. 사용자 지정 JAR 이름과 Java 요구사항도 함께 전달됩니다.
+
+이후 시작은 관리 서버의 최신 파일을 원래 경로에 반영하며, 반영 전 폴더를 같은 디스크의 `.servermanager-backup-...`에 보관합니다. 외부에서 원래 폴더를 수정했다면 덮어쓰기를 중단합니다. 그 변경을 원본으로 사용할 때만 실행기를 종료하고 폴더를 다시 등록하세요. 기존 폴더를 별도 프로그램으로 동시에 실행하지 마세요. 백업은 자동 삭제하지 않으므로 용량을 확인하세요. 번들 Java는 21이며 Java 25가 필요한 서버는 시작 전에 요구사항 오류를 안내합니다.
 
 기기 등록자는 접근 가능한 서버별로 기기 사용을 허용합니다. 그 뒤 해당 서버의 ADMIN 또는 소유자가 **서버 화면 → 실행 위치**에서 배정합니다. 등록된 실행기가 없어도 실행 위치와 등록 안내가 표시됩니다. 서버가 완전히 종료돼야 실행기를 바꿀 수 있습니다. VIEWER에게 배정·임의 콘솔 권한은 주어지지 않습니다. 연결 상태는 서버 실행기 목록에서 10초 간격으로 갱신됩니다.
 

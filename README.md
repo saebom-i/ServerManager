@@ -148,3 +148,8 @@ SM_LIVE_LAUNCHERS=1 ./gradlew test --tests local.servermanager.LauncherLiveTest
 # 최신 frontend build + bootJar 이후
 bash scripts/test-runners-live.sh
 ```
+
+
+### 친구용 실행기 설치
+
+관리 웹의 **서버 실행기** 메뉴에서 **Mac UI 설치판 / Windows UI 설치판**을 선택하면 창으로 설치·패스키 코드 등록·로그인 자동 대기를 설정할 수 있습니다. 터미널 사용자를 위한 **CLI 설치판**도 별도로 제공합니다. Java는 포함되어 있습니다. 설치 순서와 CLI 옵션은 [INSTALL.md](INSTALL.md#별도-macwindows-실행기-beta)를 참고하세요.

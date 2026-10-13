@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {readFile,writeFile,access,open} from 'node:fs/promises';
+import {readFile,writeFile,access,open,cp,mkdir,rename,rm,readdir,realpath} from 'node:fs/promises';
 import {spawn, type ChildProcess} from 'node:child_process';
 import net from 'node:net';
 
@@ -19,7 +19,8 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
  await page.goto('/');await page.getByLabel('등록 코드').fill((await readFile(home+'/profiles/security/setup-code.txt','utf8')).trim());await page.getByRole('button',{name:'패스키 등록',exact:true}).click();await expect(page.getByRole('button',{name:'서버 실행기',exact:true})).toBeVisible();
  const session=await (await page.request.get('/api/auth/session')).json();
  async function api(path:string,method='GET',data?:any){const r=await page.request.fetch('/api'+path,{method,data,headers:{'X-CSRF-TOKEN':session.csrf}});expect(r.status(),`${method} ${path}: ${await r.text()}`).toBeLessThan(300);return r.headers()['content-type']?.includes('json')?r.json():null;}
- const shared=await freePort(),ids:string[]=[],runners:ChildProcess[]=[],runnerHomes:string[]=[];
+ const shared=await freePort(),ids:string[]=[],runners:ChildProcess[]=[],runnerHomes:string[]=[],devices:string[]=[];
+ const originalFolder=home+'/original Minecraft server';
  const trust=['-Djavax.net.ssl.trustStore='+home+'/tls.p12','-Djavax.net.ssl.trustStorePassword=fixture-only-password'];
  async function state(id:string){return (await api('/instances')).find((i:any)=>i.config.id===id)?.state;}
  async function waitState(id:string,wanted:string){await expect.poll(()=>state(id),{timeout:180000,intervals:[1000,2000]}).toBe(wanted);}
@@ -33,10 +34,19 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
    await api('/instances/'+id+'/text','PUT',{path:'server.properties',content});
    await api('/instances/'+id+'/game-domain','PUT',{label:index?'beta':'alpha'});
    const runnerHome=home+'/runner-'+index;runnerHomes.push(runnerHome);const env={...process.env,SERVER_MANAGER_RUNNER_HOME:runnerHome};
+   if(index===0) {
+    await cp(home+'/profiles/'+id+'/server',originalFolder,{recursive:true});
+    await rename(originalFolder+'/server.jar',originalFolder+'/custom-vanilla.jar');
+    await rm(originalFolder+'/server-manager-runtime.json');
+    await writeFile(originalFolder+'/original-folder-proof.txt','must remain in the original folder\n');
+    await mkdir(runnerHome+'/instances/'+id,{recursive:true});
+    await writeFile(runnerHome+'/instances/'+id+'/server-folder.properties',`path=${await realpath(originalFolder)}\ninitial=true\njar=custom-vanilla.jar\nrequiredJava=21\n`);
+   }
    const code=(await api('/runners/enroll','POST',{name:'Live fixture '+index})).code;
    const pair=spawn(java,[...trust,'-jar',jar,'--runner-pair','--manager-url=https://localhost:8796'],{env,stdio:['pipe','ignore','pipe']});pair.stdin!.end(code+'\n');
    await new Promise<void>((resolve,reject)=>{let error='';pair.stderr!.on('data',d=>error+=d);pair.once('exit',n=>n===0?resolve():reject(Error('Pairing failed: '+error)));pair.once('error',reject);});
    const device=JSON.parse(await readFile(runnerHome+'/identity.json','utf8')).id;
+   devices.push(device);
    await api('/runners/'+device+'/allow/'+id,'PUT');await api('/instances/'+id+'/runner','PUT',{runnerId:device});
    const log=await open(runnerHome+'/test.log','w');const runner=spawn(java,[...trust,'-jar',jar,'--runner'],{env,stdio:['ignore',log.fd,log.fd]});runners.push(runner);await log.close();
    await expect.poll(async()=> (await api('/runners')).find((d:any)=>d.id===device)?.online,{timeout:30000}).toBe(true);
@@ -67,17 +77,31 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   expect(JSON.stringify((await query(shared,'alpha.server.example.com')).description)).toContain('Fixture-0');
   expect(JSON.stringify((await query(shared,'beta.server.example.com')).description)).toContain('Fixture-1');
   await expect(query(shared,'unknown.server.example.com')).rejects.toThrow();
-  await writeFile(runnerHomes[0]+'/instances/'+ids[0]+'/server/handoff-proof.txt','changed only after remote start\n');
+  await writeFile(originalFolder+'/handoff-proof.txt','changed only after remote start\n');
   await api('/instances/'+ids[0]+'/command','POST',{command:'list'});
   await api('/instances/'+ids[0]+'/stop','POST');await waitState(ids[0],'STOPPED');
   expect(await readFile(home+'/profiles/'+ids[0]+'/server/handoff-proof.txt','utf8')).toContain('changed only');
   await access(home+'/profiles/'+ids[0]+'/server/world/level.dat');
   expect(await access(home+'/profiles/'+ids[0]+'/remote-lease').then(()=>true,()=>false)).toBe(false);
+  expect(await readFile(originalFolder+'/original-folder-proof.txt','utf8')).toContain('original folder');
+  expect(await access(runnerHomes[0]+'/instances/'+ids[0]+'/server').then(()=>true,()=>false)).toBe(false);
+  // The original path remains stable; later central changes pull into it with a sibling backup.
+  await api('/instances/'+ids[0]+'/text','PUT',{path:'central-edit.txt',content:'central change after first upload'});
+  await api('/instances/'+ids[0]+'/start','POST');await waitState(ids[0],'RUNNING');
+  expect(await readFile(originalFolder+'/central-edit.txt','utf8')).toContain('central change');
+  expect((await readdir(home)).some(name=>name.startsWith('.servermanager-backup-'+ids[0]))).toBe(true);
+  await api('/instances/'+ids[0]+'/stop','POST');await waitState(ids[0],'STOPPED');
   expect(JSON.stringify((await query(shared,'beta.server.example.com')).description)).toContain('Fixture-1');
   await expect(query(shared,'alpha.server.example.com')).rejects.toThrow();
   await api('/instances/'+ids[1]+'/stop','POST');await waitState(ids[1],'STOPPED');await access(home+'/profiles/'+ids[1]+'/server/world/level.dat');
+  // Custom entryJar metadata follows the world to a normal second runner.
+  await api('/runners/'+devices[1]+'/allow/'+ids[0],'PUT');await api('/instances/'+ids[0]+'/runner','PUT',{runnerId:devices[1]});
+  await api('/instances/'+ids[0]+'/start','POST');await waitState(ids[0],'RUNNING');
+  expect(JSON.stringify((await query(shared,'alpha.server.example.com')).description)).toContain('Fixture-0');
+  await access(runnerHomes[1]+'/instances/'+ids[0]+'/server/custom-vanilla.jar');
+  await api('/instances/'+ids[0]+'/stop','POST');await waitState(ids[0],'STOPPED');
   const accounts=JSON.parse(await readFile(home+'/profiles/security/accounts.json','utf8'));expect(JSON.stringify(accounts)).not.toContain('fixture-only-password');
-  console.log('PASS: passkey enrollment, actual signed WSS runners, two official Minecraft JVMs, shared-port hostname isolation, busy-port recovery, console and normal save/file handoff.');
+  console.log('PASS: original-folder direct execution and stable-path restart/backup, custom JAR migration, passkey enrollment, signed WSS runners, shared TCP isolation, busy-port recovery, console and normal save/file handoff.');
  } finally {
   let safe=true;
   for(const id of ids){try{const current=await state(id);if(['RUNNING','STARTING'].includes(current)){await api('/instances/'+id+'/stop','POST');await waitState(id,'STOPPED');}else if(['STOPPING','SYNCING','TRANSFERRING','UNKNOWN','SYNC_FAILED'].includes(current)){await waitState(id,'STOPPED');}}catch{safe=false;}}

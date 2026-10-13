@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+package_home="$(cd "$(dirname "$0")/../Resources" && pwd)"
+case "$(uname -m)" in arm64) arch=aarch64;; x86_64) arch=x64;; *) exit 1;; esac
+exec "$package_home/runtimes/$arch/Contents/Home/bin/java" -Xdock:name="Server Manager Runner 설치" -jar "$package_home/runner-setup.jar" --gui

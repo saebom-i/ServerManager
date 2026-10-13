@@ -1,4 +1,4 @@
 @echo off
 chcp 65001 >nul
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1"
-pause
+"%~dp0runtime\bin\java.exe" -jar "%~dp0runner-setup.jar" --cli %*
+exit /b %errorlevel%

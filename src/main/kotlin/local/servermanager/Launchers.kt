@@ -41,7 +41,13 @@ object Launchers {
                 listOf("@${args.toAbsolutePath()}","nogui")
             }
             else -> {
-                val jar=server.resolve(if(i.loader=="Fabric") "fabric-server-launch.jar" else "server.jar")
+                val metadata=server.resolve("server-manager-runtime.json")
+                val entry=if(metadata.isRegularFile()) {
+                    require(metadata.fileSize()<=65536) { "설치 메타데이터가 너무 큽니다" }
+                    jacksonObjectMapper().readTree(metadata.readText()).path("entryJar").asText("").takeIf {it.isNotBlank()}
+                } else null
+                require(entry==null || (entry.endsWith(".jar") && '/' !in entry && '\\' !in entry && ':' !in entry && entry!="..")) { "잘못된 서버 JAR 경로입니다" }
+                val jar=server.resolve(entry ?: if(i.loader=="Fabric") "fabric-server-launch.jar" else "server.jar")
                 require(jar.isRegularFile()) { "${i.loader} 서버 JAR가 없습니다. 먼저 런처를 설치하세요" }
                 listOf("-jar",jar.toAbsolutePath().toString(),"nogui")
             }
