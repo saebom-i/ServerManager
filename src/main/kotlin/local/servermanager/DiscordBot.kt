@@ -25,6 +25,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.read
 
 /** Bounded aggregation: no raw log lines, network work or unbounded queue on the process reader. */
 class DiscordAlerts {
@@ -53,7 +54,7 @@ class DiscordAlerts {
 data class DiscordBotStatus(val state:String, val message:String, val inviteUrl:String?, val guilds:List<Map<String,String>>)
 
 @Service
-class DiscordBot(private val manager:ServerManager, private val audit:AuditLog):ListenerAdapter() {
+class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, private val desktop:DesktopLifecycle):ListenerAdapter() {
     private val settings=DiscordSettingsStore(manager.root.resolve("security/discord"))
     private val lifecycle=Executors.newSingleThreadExecutor()
     private val generation=AtomicLong()
@@ -152,7 +153,11 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog):
             }, { hook.editOriginal("현재 서버 역할을 확인하지 못했습니다. 잠시 후 다시 시도하세요.").queue({}, {}) })
         }, {})
     }
-    @Synchronized fun execute(guild:String,roles:Set<String>,user:String,requestId:String,id:String,action:String):String {
+    fun execute(guild:String,roles:Set<String>,user:String,requestId:String,id:String,action:String):String = desktop.gate.read {
+        if(desktop.stopping) "관리 앱 업데이트 중입니다. 잠시 후 다시 시도하세요."
+        else executeAllowed(guild,roles,user,requestId,id,action)
+    }
+    @Synchronized private fun executeAllowed(guild:String,roles:Set<String>,user:String,requestId:String,id:String,action:String):String {
         val config=view().config
         if(action !in setOf("start","status") || !DiscordAccess.allowed(config,guild,roles,id,action=="start")) {
             audit.append("discord:$guild:$user","discord $action",403,"discord");return "이 서버에 대한 ${if(action=="start") "시작" else "조회"} 권한이 없습니다. 관리자에게 역할 설정을 요청하세요."

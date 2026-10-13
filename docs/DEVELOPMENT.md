@@ -28,3 +28,10 @@ Remaining scheduled work:
 4. Continue UI improvements backed by evidence. Keep no-new-log parsing skip, runtime-only worker parsing and 500ms overlay rules.
 
 Publish only validated batches as BETA prereleases. The user explicitly authorized this scope's BETA publishing and local application. Default application is graceful Minecraft stop first, no forced stop. Preserve accounts, proxy credentials, settings and worlds. Record actual release/application outcome below.
+
+## 0.4.0-beta.2 — automatic-update follow-up
+
+- Discord server control now uses the same maintenance read lock as web mutations; it refuses commands once the updater enters its exclusive restart phase. Regression assertion included in DiscordTest.
+- `scripts/test-update-protocol.py` exercises the actual scheduled update check, GitHub downloads, signature/hash verification, bootstrap application and passkey login with isolated profile data. Only its initial fixture version metadata is lowered; updater and release public key are unchanged.
+- The BETA 1 real-GitHub integration run passed in about 80 seconds, including unchanged account/config files and login with the same passkey after restart.
+- Production was moved to a persistent installed-app supervisor with unchanged account/proxy/config data; local deployment details remain in LOCAL-TEST-RESULTS.md.

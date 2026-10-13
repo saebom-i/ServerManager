@@ -71,7 +71,8 @@ class DiscordTest {
         `when`(manager.instance("a")).thenReturn(i)
         `when`(manager.view("a")).thenReturn(mapOf("state" to "STOPPED"))
         `when`(manager.list()).thenReturn(listOf(mapOf("config" to i)))
-        val bot=DiscordBot(manager,AuditLog(temp.resolve("audit.jsonl")))
+        val desktop=DesktopLifecycle(manager,mock(org.springframework.context.ConfigurableApplicationContext::class.java))
+        val bot=DiscordBot(manager,AuditLog(temp.resolve("audit.jsonl")),desktop)
         try {
             assertContains(bot.execute(guild,emptySet(),"u","denied","a","start"),"권한이 없습니다")
             verify(manager,never()).start(anyString())
@@ -81,6 +82,10 @@ class DiscordTest {
             assertContains(bot.execute(guild,setOf(role),"u","one","a","start"),"이미 처리")
             verify(manager,times(1)).start("a")
             assertContains(bot.execute(guild,setOf(role),"u","two","a","start"),"10초")
+            desktop.stopping=true
+            assertContains(bot.execute(guild,setOf(role),"another","maintenance","a","start"),"업데이트 중")
+            verify(manager,times(1)).start("a")
+            desktop.stopping=false
             bot.save(DiscordSave(DiscordConfig(),1))
             assertContains(bot.execute(guild,setOf(role),"u","three","a","start"),"권한이 없습니다")
             verify(manager,times(1)).start("a")
