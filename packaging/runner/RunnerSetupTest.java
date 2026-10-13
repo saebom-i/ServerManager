@@ -98,6 +98,7 @@ public class RunnerSetupTest {
             }
             Files.writeString(home.resolve("instances/"+serverId+"/dirty"),"pending-transfer");
             rejects(()->RunnerSetup.bindFolder(home,binding),"unfinished handoff");
+            rejects(()->RunnerSetup.install(source,target,home,true,services,s->{}),"installer unfinished handoff");
             Files.delete(home.resolve("instances/"+serverId+"/dirty"));
             if(!RunnerSetup.WINDOWS) {
                 Files.createSymbolicLink(existing.resolve("escape"),temp);

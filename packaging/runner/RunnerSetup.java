@@ -168,6 +168,10 @@ public final class RunnerSetup {
         Files.createDirectories(data); Files.createDirectories(destination.getParent());
         try(FileChannel setup=FileChannel.open(data.resolve("setup.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE);FileLock setupLock=setup.tryLock()) {
             if(setupLock==null) throw new IOException("다른 설치 창이 작업 중입니다.");
+            Path instances=data.resolve("instances");
+            if(Files.isDirectory(instances))try(var children=Files.list(instances)) {
+                if(children.anyMatch(path->Files.exists(path.resolve("dirty"))))throw new IOException("실행 중이거나 파일 인계를 마치지 않은 서버가 있습니다. 정상 종료·인계를 완료한 뒤 설치하세요.");
+            }
             try(FileChannel runner=FileChannel.open(data.resolve("runner.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE);FileLock runnerLock=runner.tryLock()) {
                 if(runnerLock==null) throw new IOException("실행기가 이미 대기 중입니다. 게임을 정상 종료하고 실행기를 종료한 뒤 설치하세요. 기존 등록은 유지됩니다.");
                 if(Files.isSymbolicLink(destination) || (Files.exists(destination) && (!Files.isRegularFile(destination.resolve("runner-bootstrap.jar")) || !Files.isRegularFile(destination.resolve("version.txt")))))

@@ -42,6 +42,12 @@ def guide(folder,gui,platform):
 4. 5분 안에 코드를 설치기에 붙여넣고 설치·연결
 5. 웹에서 컴퓨터의 온라인 상태 확인 → 서버 사용 허용 → 서버 화면에서 실행 위치 선택
 
+기존 마크 서버가 있다면 UI의 '기존 마크 서버 폴더'를 선택하세요.
+웹에서 같은 종류·버전의 서버를 만들고 ID를 복사한 뒤 원래 폴더를 지정합니다.
+CLI: install.command / install.cmd --server-id=UUID --server-path="기존 서버 폴더"
+JAR 이름이 다르면 --server-jar=paper.jar (Forge/NeoForge는 생략).
+원래 위치에서 실행하며, 정상 종료 후 변경 파일이 관리 서버로 인계됩니다.
+
 Java 포함 / 로그인 자동 대기 선택 가능 / 원격 컴퓨터의 포트포워딩 불필요
 Windows x64, Mac Intel·Apple Silicon 지원. 관리자 권한은 요청하지 않습니다.
 등록 코드는 기기 등록용 일회용 코드이며 패스키 비밀키를 복사하지 않습니다.
