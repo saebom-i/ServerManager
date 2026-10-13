@@ -12,7 +12,7 @@ async function query(port:number,host:string){return new Promise<any>((resolve,r
  socket.on('connect',()=>{const h=Buffer.from(host);const p=Buffer.concat([varint(0),varint(767),varint(h.length),h,Buffer.from([port>>8,port&255]),varint(1)]);socket.write(Buffer.concat([varint(p.length),p,Buffer.from([1,0])]));});
  socket.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);let offset=0;function read(){let n=0;for(let i=0;i<5;i++){if(offset>=bytes.length)throw Error('partial');const b=bytes[offset++];n|=(b&127)<<(7*i);if(!(b&128))return n;}throw Error('bad varint');}try{const length=read();if(bytes.length-offset<length)return;expect(read()).toBe(0);const size=read();finish(undefined,JSON.parse(bytes.subarray(offset,offset+size).toString()));}catch(e){if((e as Error).message!=='partial')finish(e as Error);}});
  });}
-test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe failed start and stop handoff',async({page,context})=>{
+test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe failed start and stop handoff',async({page,context,browser})=>{
  const home=process.env.SM_RUNNERS_TEST_HOME||'';expect(home.startsWith('/tmp/servermanager-runners.')).toBe(true);
  const java=process.env.SM_RUNNERS_TEST_JAVA!,jar=process.env.SM_RUNNERS_TEST_JAR!;
  const cdp=await context.newCDPSession(page);await cdp.send('WebAuthn.enable');await cdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}});
@@ -46,6 +46,22 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   await new Promise<void>(r=>blocker.listen(row.config.port,'127.0.0.1',r));
   try{await api('/instances/'+ids[0]+'/start','POST');await waitState(ids[0],'FAILED');expect(await access(home+'/profiles/'+ids[0]+'/remote-lease').then(()=>true,()=>false)).toBe(false);}finally{await new Promise<void>(r=>blocker.close(()=>r()));}
   for(const id of ids){await api('/instances/'+id+'/start','POST');await waitState(id,'RUNNING');}
+  await api('/instances/'+ids[0]+'/power-saving','PUT',{enabled:true,minutes:30});
+  await expect.poll(async()=> (await api('/instances/'+ids[0]+'/power-saving')).status,{timeout:30000}).toBe('EMPTY');
+  expect((await api('/instances/'+ids[0]+'/power-saving')).remainingSeconds).toBeGreaterThan(1700);
+  const invitation=await api('/admin/invitations','POST',{name:'Power viewer fixture',permissions:{[ids[0]]:'VIEWER'}});
+  const viewerContext=await browser.newContext({baseURL:'https://localhost:8796',ignoreHTTPSErrors:true});
+  try {
+   const viewer=await viewerContext.newPage();const viewerCdp=await viewerContext.newCDPSession(viewer);await viewerCdp.send('WebAuthn.enable');await viewerCdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}});
+   await viewer.goto('/');await viewer.getByLabel('등록 코드').fill(invitation.token);await viewer.getByRole('button',{name:'패스키 등록',exact:true}).click();await expect(viewer.getByRole('button',{name:'서버 실행기',exact:true})).toBeVisible();
+   const viewerSession=await (await viewer.request.get('/api/auth/session')).json();
+   expect((await viewer.request.get('/api/instances/'+ids[0]+'/power-saving')).status()).toBe(200);
+   expect((await viewer.request.put('/api/instances/'+ids[0]+'/power-saving',{data:{enabled:false,minutes:30},headers:{'X-CSRF-TOKEN':viewerSession.csrf}})).status()).toBe(403);
+   expect((await viewer.request.get('/api/instances/'+ids[1]+'/power-saving')).status()).toBe(403);
+  } finally {await viewerContext.close();}
+  expect((await page.request.put('/api/instances/'+ids[0]+'/power-saving',{data:{enabled:false,minutes:30}})).status()).toBe(403);
+  const invalid=await page.request.put('/api/instances/'+ids[0]+'/power-saving',{data:{enabled:true,minutes:1},headers:{'X-CSRF-TOKEN':session.csrf}});expect(invalid.status()).toBe(400);
+  await api('/instances/'+ids[0]+'/power-saving','PUT',{enabled:false,minutes:30});
   for(const row of await api('/instances'))expect(JSON.stringify((await query(row.config.port,'localhost')).description)).toContain('Fixture-');
   console.log('Both Minecraft processes respond directly. Querying shared TCP '+shared);
   expect(JSON.stringify((await query(shared,'alpha.server.example.com')).description)).toContain('Fixture-0');

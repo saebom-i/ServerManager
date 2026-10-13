@@ -32,6 +32,7 @@ interface RemoteController {
     fun command(instance:Instance,value:String)
     fun completed(instance:Instance) {}
     fun sharedGamePort():Int?=null
+    fun stopIfEmpty(instance:Instance,requestId:String):Boolean=false
 }
 
 class RuntimeState {
@@ -47,6 +48,12 @@ class RuntimeState {
     @Volatile var remoteWorkerReady = false
     @Volatile var remoteCloudReady = false
     @Volatile var remotePid:Long? = null
+    @Volatile var diagnosticActive=false
+    @Volatile var activityVersion=0L
+    @Volatile var stopReason:String?=null
+    @Volatile var idleCheckPending=false
+    var idleRequestId:String?=null
+    var idleRequestAt=0L
     fun event(kind: String, text: String) = synchronized(this) {
         events.addLast(Event(++seq, Instant.now().toString(), kind, text))
         while(events.size > 10000) events.removeFirst()
@@ -68,6 +75,11 @@ class ServerManager {
     private val query = MinecraftQuery()
     private val signalListeners = java.util.concurrent.CopyOnWriteArrayList<(ServerSignal)->Unit>()
     @Volatile private var remoteController:RemoteController?=null
+    @Volatile private var powerStatus:((String)->PowerStatus)?=null
+    fun attachPowerStatus(provider:(String)->PowerStatus){powerStatus=provider}
+    private val joined=Regex("(?:logged in with entity id|joined the game)")
+    private fun playerActivity(r:RuntimeState,line:String){if(joined.containsMatchIn(line))synchronized(r){r.activityVersion++}}
+    fun setDiagnosticActive(id:String,active:Boolean){val r=runtime(id);synchronized(r){check(!active||!r.idleCheckPending){"무인 종료 직전 확인이 끝난 뒤 진단을 시작하세요"};r.diagnosticActive=active;r.activityVersion++}}
     fun attachRemoteController(controller:RemoteController) { remoteController=controller }
     fun onSignal(listener:(ServerSignal)->Unit):AutoCloseable { signalListeners.add(listener); return AutoCloseable { signalListeners.remove(listener) } }
     private fun signal(id:String,kind:String,detail:String) { signalListeners.forEach { listener -> runCatching { listener(ServerSignal(id,kind,detail)) } } }
@@ -129,7 +141,8 @@ class ServerManager {
     }
     fun view(id: String): Map<String, Any?> {
         val i = instance(id); val r = runtime(id)
-        return synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id)) }
+        val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive) }
+        return result+mapOf("powerSaving" to powerStatus?.invoke(id))
     }
     private fun validate(req: CreateRequest) {
         require(req.name.isNotBlank() && req.name.length <= 80) { "이름은 1~80자로 입력하세요" }
@@ -225,6 +238,7 @@ class ServerManager {
         val i=instance(id); val r=runtime(id)
         synchronized(r) {
             checkIdle(r); require(r.state != "IMPORT_FAILED") { "실패한 팩은 시작할 수 없습니다. 원본 mrpack에서 다시 가져오세요" }; require(eulaAccepted(id)) { "Minecraft EULA에 먼저 동의하세요" }
+            r.activityVersion++;r.stopReason=null;r.idleCheckPending=false;r.idleRequestId=null
             if(i.runnerId!=null) {
                 val controller=remoteController ?: error("원격 실행기 연결 기능을 사용할 수 없습니다")
                 root.resolve(id).resolve("remote-lease").writeText(i.runnerId!!)
@@ -246,7 +260,7 @@ class ServerManager {
             workers.submit {
                 consume(id,p); val code=p.waitFor()
                 val requested=synchronized(r) { val stopped=r.state=="STOPPING"; if(r.process===p) { r.process=null; r.state=if(code==0) "STOPPED" else "FAILED" }; r.event("system","서버 종료 (exit $code)"); stopped }
-                signal(id,"stop",if(requested) "종료 요청 후 서버가 종료되었습니다 (exit $code)." else "예기치 않게 서버가 종료되었습니다 (exit $code).")
+                signal(id,"stop",if(requested && r.stopReason=="IDLE")"무인 절전 요청 후 서버가 종료되었습니다 (exit $code)." else if(requested) "종료 요청 후 서버가 종료되었습니다 (exit $code)." else "예기치 않게 서버가 종료되었습니다 (exit $code).")
             }
         }
     }
@@ -257,6 +271,7 @@ class ServerManager {
         java.io.FileOutputStream(log.toFile(),true).bufferedWriter().use { writer ->
             p.inputStream.bufferedReader().useLines { lines -> lines.forEach { raw ->
                 val line=raw.replace(Regex("\u001B\\[[0-?]*[ -/]*[@-~]"), "")
+                playerActivity(r,line)
                 val kind=when { line.contains("ERROR") || line.contains("Exception") -> "error"; line.contains("WARN") -> "warn"; else -> "output" }
                 synchronized(r) { if(r.state=="STARTING" && line.contains("Done (") && line.contains("For help")) r.state="RUNNING"; r.event(kind,line) }
                 if(kind=="error") signal(id,"error","서버 로그에서 오류가 감지되었습니다. 관리 웹의 콘솔에서 내용을 확인하세요.")
@@ -334,6 +349,7 @@ class ServerManager {
     fun remoteLog(id:String,runnerId:String,kind:String,line:String) {
         if(instance(id).runnerId!=runnerId)return
         val r=runtime(id)
+        playerActivity(r,line)
         synchronized(r) { r.event(if(kind in setOf("error","warn","output")) kind else "output",line.take(4096)) }
         if(kind=="error") signal(id,"error","원격 서버 로그에서 오류가 감지되었습니다. 관리 웹의 콘솔에서 확인하세요.")
     }
@@ -359,9 +375,42 @@ class ServerManager {
         val requested=synchronized(r) { val value=r.remoteStopRequested;r.remoteStopRequested=false;r.remoteWorkerReady=false;r.remoteCloudReady=false;r.state="STOPPED";r.players=null;r.resources=null;r.remotePid=null;r.event("system","원격 서버 파일 인계를 완료했습니다");value }
         root.resolve(id).resolve("remote-lease").deleteIfExists()
         remoteController?.completed(i)
-        signal(id,"stop",if(requested) "종료 요청 후 서버 데이터 인계까지 완료되었습니다." else "서버가 종료되어 데이터 인계를 완료했습니다.")
+        signal(id,"stop",if(requested && r.stopReason=="IDLE")"무인 절전 요청 후 서버 종료와 데이터 인계를 완료했습니다." else if(requested) "종료 요청 후 서버 데이터 인계까지 완료되었습니다." else "서버가 종료되어 데이터 인계를 완료했습니다.")
     }
     fun events(id: String,after: Long): List<Event> { val r=runtime(id); return synchronized(r) { r.events.filter { it.seq>after }.take(2000) } }
+    fun stopIfEmpty(id:String,activity:Long):Boolean {
+        val i=instance(id);val r=runtime(id)
+        val process=synchronized(r) {
+            if(r.state!="RUNNING"||r.diagnosticActive||r.activityVersion!=activity||r.idleCheckPending)return false
+            if(i.runnerId!=null) {
+                val request=UUID.randomUUID().toString();r.idleRequestId=request;r.idleRequestAt=System.nanoTime();r.idleCheckPending=true
+                if(remoteController?.stopIfEmpty(i.copy(),request)==true)return true
+                r.idleCheckPending=false;r.idleRequestId=null;return false
+            }
+            r.idleCheckPending=true;r.idleRequestAt=System.nanoTime();r.process
+        } ?: run {synchronized(r){r.idleCheckPending=false};return false}
+        try {
+            val count=query.currentCount(i.port)
+            synchronized(r) {
+                if(r.process!==process||!process.isAlive||r.state!="RUNNING"||r.diagnosticActive||r.activityVersion!=activity||count!=0){r.players=null;r.activityVersion++;return false}
+                r.stopReason="IDLE";command(id,"stop");r.event("system","${powerStatus?.invoke(id)?.config?.minutes ?: 30}분 연속 무인 상태를 확인하여 저장 후 정상 종료합니다")
+                return true
+            }
+        } finally {synchronized(r){r.idleCheckPending=false}}
+    }
+    fun remoteIdleResult(id:String,runnerId:String,request:String?,accepted:Boolean) {
+        if(instance(id).runnerId!=runnerId)return
+        val r=runtime(id)
+        synchronized(r) {
+            if(!r.idleCheckPending||request==null||r.idleRequestId!=request)return
+            r.idleCheckPending=false;r.idleRequestId=null
+            if(accepted){r.stopReason="IDLE";r.remoteStopRequested=true;if(r.state=="RUNNING")r.state="STOPPING";r.event("system","실행기에서 무인 상태를 다시 확인하여 저장 후 정상 종료합니다")}
+            else {r.activityVersion++;r.event("system","실행기의 무인 상태를 확인하지 못해 자동 종료를 취소했습니다")}
+        }
+    }
+    fun expireIdleCheck(id:String) {
+        val r=runtime(id);synchronized(r){if(r.idleCheckPending&&System.nanoTime()-r.idleRequestAt>20_000_000_000L){r.idleCheckPending=false;r.idleRequestId=null;r.activityVersion++}}
+    }
     fun eventPage(id:String,before:Long?,after:Long?,limit:Int):Map<String,Any?> {
         require(limit in 1..500) { "로그 조회 개수는 1~500입니다" }
         require(before==null || after==null) { "이전 또는 이후 커서 중 하나만 지정하세요" }

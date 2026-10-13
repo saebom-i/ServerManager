@@ -64,3 +64,17 @@ Validation completed:
 - Actual Cloudflare DNS edits require the owner's token/zone and were not performed; provider ownership/upsert/cleanup tests use a fake API. Read-only nginx inspection confirms existing HTTP/1.1 and Upgrade/Connection directives. Existing web routing was not changed.
 
 Release/local application details and protected-file checks are recorded in ignored LOCAL-TEST-RESULTS.md. Continue prior Modrinth, conflict-search and idle-shutdown work after this validated release batch; do not repeat completed DNS/runner work.
+
+
+## 0.4.0-beta.6 — player-free graceful shutdown
+
+- Per-instance opt-in OFF/30-minute defaults, 30–60-minute settings, instance ADMIN writes/VIEWER reads using existing CSRF/permission guards. Policy and decision history are separate from Instance JSON, preserving old worker deserialization. Recent stop cause survives app restart; timers intentionally restart from zero.
+- Contiguous distinct fresh zero samples drive a monotonic timer. Nonzero/unknown/stale/gap/PID/device/activity changes, STARTING/UNKNOWN and diagnostic flags reset continuity. Local and remote final checks query the actual executing computer; join activity during the check aborts it. Diagnostics/settings cannot race a pending final check.
+- New correlated idle-stop/idle-result protocol requires worker >=beta.6, checks selected device plus request ID, refuses old/unready/unknown/occupied states and never falls back to an unchecked or forced stop. Starts still require normal Discord/web permissions and pending data/lease guards. UI and Discord panel/status include settings/countdown/cause; idle stop alerts distinguish their normal reason.
+- Actual Vanilla test exposed an older MinecraftQuery defect: challenge identifiers pass through UTF-8 formatting in official QueryThreadGs4$RequestChallenge. Arbitrary random high-bit identifiers corrupt their echo; low-nibble identifiers and connected loopback UDP fix actual player counts. Regression responder now mimics official behavior.
+- Validation: 67 ordinary backend tests passed; five additional opt-in official launcher cases passed separately; 12 browser tests passed including opt-in/range/running-server drafts and existing 7,000-line log/worker loading rules. Worker final check uses mock process plus actual loopback UDP for zero/occupied/unknown/join/unready cases and verifies no destroyForcibly call. Clock simulation verifies full 30-minute continuity without waiting in real time.
+- Real isolated HTTPS/passkey/two signed WSS worker integration passed in 1.5m: actual Vanilla/Fabric empty counts and EMPTY countdown, invalid duration rejection, OFF change, shared TCP isolation, console, normal world save/file handoff. Windows runtime remains untested on Windows; no real Discord test messages sent.
+- Claude's beta.4 review patch was not merged: default forced shutdown and partial-line flush regression remain review findings. Its enum/locking changes are not part of this batch.
+- Release/application results remain in LOCAL-TEST-RESULTS.md. Next scheduled scope is Modrinth link install plus dedicated mod management, then dependency-preserving isolated conflict search. Do not repeat finished Discord/runner/DNS/idle features. Same-host simultaneous servers remain issue #1 future-only.
+
+Final freshness validation: uncached basic-stat is used before stop; all five actual official launchers verified both basic and full empty counts after their Query listener became available.

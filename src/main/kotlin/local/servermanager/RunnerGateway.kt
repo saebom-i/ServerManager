@@ -69,6 +69,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         val event=runCatching { mapper.readValue<RunnerMessage>(message.payload) }.getOrNull() ?: return
         when(event.type) {
             "heartbeat" -> registry.seen(id,event.version?.take(80) ?: "unknown")
+            "idle-result" -> event.instanceId?.let {manager.remoteIdleResult(it,id,event.detail,event.state=="ACCEPTED")}
             "state" -> {
                 registry.seen(id,event.version?.take(80) ?: "unknown")
                 val instanceId=event.instanceId ?: return
@@ -170,6 +171,12 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         io.submit {while(!listener.isClosed){val socket=runCatching {listener.accept()}.getOrNull() ?: break;relayPlayer(socket,instance.id,runnerId)}}
     }
     override fun sharedGamePort():Int?=network?.config()?.takeIf {it.enabled}?.port
+    override fun stopIfEmpty(instance:Instance,requestId:String):Boolean {
+        val id=requireRunner(instance)
+        val version=registry.active(id)?.version ?: return false
+        if(!runCatching {SignedUpdates.compare(version,"0.4.0-beta.6")>=0}.getOrDefault(false))return false
+        return send(id,RunnerMessage("idle-stop",instanceId=instance.id,detail=requestId))
+    }
     private fun closeStream(stream:GameStream,notify:Boolean) {
         if(sockets.remove(stream.id,stream)) {
             runCatching { stream.socket.close() }

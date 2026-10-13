@@ -15,6 +15,7 @@ import java.io.PrintStream
 import java.nio.charset.StandardCharsets
 import java.net.Socket
 import java.net.ServerSocket
+import java.util.concurrent.atomic.AtomicLong
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
@@ -129,6 +130,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     private val uploading=ConcurrentHashMap.newKeySet<String>()
     private val stopping=ConcurrentHashMap.newKeySet<String>()
     private val ready=ConcurrentHashMap.newKeySet<String>()
+    private val activity=ConcurrentHashMap<String,AtomicLong>()
     private val query=MinecraftQuery()
     private val metrics=ProcessMetrics()
     private fun instanceRoot(id:String)=home.resolve("instances").resolve(id)
@@ -204,6 +206,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                         "session" -> { sessionToken=message.token;recoverStates() }
                         "start" -> if(message.instanceId!=null && message.detail!=null) workers.submit { beginStart(message.instanceId,message.detail) }
                         "stop" -> message.instanceId?.let { stop(it) }
+                        "idle-stop" -> if(message.instanceId!=null && message.detail!=null)workers.submit {stopIfEmpty(message.instanceId,message.detail)}
                         "restart" -> message.instanceId?.let { stop(it) }
                         "command" -> if(message.instanceId!=null && message.command!=null) command(message.instanceId,message.command)
                         "open" -> if(message.instanceId!=null && message.streamId!=null) openGame(message.instanceId,message.streamId)
@@ -247,7 +250,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     }
     private fun openGame(instanceId:String,streamId:Int) {
         val port=configs[instanceId]?.port ?: return
-        if(processes[instanceId]?.isAlive!=true || instanceId !in ready || gameStreams.size>=100)return
+        if(processes[instanceId]?.isAlive!=true || instanceId !in ready || instanceId in stopping || gameStreams.size>=100)return
         workers.submit {
             val socket=Socket()
             try {
@@ -340,6 +343,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         values.setProperty("enable-query","true");values.setProperty("query.port",instance.port.toString())
         properties.outputStream().use { values.store(it,"Server Manager Runner") }
         ready.remove(id)
+        activity[id]=AtomicLong()
         val process=ProcessBuilder(args)
             .directory(serverDir(id).toFile()).redirectErrorStream(true).start()
         onSpawned()
@@ -352,10 +356,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             FileOutputStream(log.toFile(),true).bufferedWriter().use { writer ->
             process.inputStream.bufferedReader().useLines { lines -> lines.forEach { line ->
                 val kind=if(line.contains("ERROR") || line.contains("Exception")) "error" else if(line.contains("WARN")) "warn" else "output"
+                if(line.contains("logged in with entity id")||line.contains("joined the game"))activity[id]?.incrementAndGet()
                 writer.appendLine(line);writer.flush()
                 send(RunnerMessage("log",id,kind,version(),line.take(4096)))
                 if(line.contains("Done (") && line.contains("For help") && processes[id]===process) {
-                    ready.add(id);send(RunnerMessage("state",id,"RUNNING",version(),pid=process.pid()))
+                    ready.add(id);if(id !in stopping)send(RunnerMessage("state",id,"RUNNING",version(),pid=process.pid()))
                 }
             } } }
             val code=process.waitFor()
@@ -394,11 +399,19 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         } catch(e:Exception) { send(RunnerMessage("state",id,"SYNC_FAILED",version(),e.message?.take(300) ?: "서버 파일 인계 실패")) }
         finally { uploading.remove(id) }
     }
-    private fun stop(id:String) {
-        val process=processes[id] ?: return
+    private fun stop(id:String):Boolean {
+        val process=processes[id] ?: return false
+        if(!runCatching {process.outputStream.write("stop\n".toByteArray());process.outputStream.flush()}.isSuccess)return false
         stopping.add(id)
-        runCatching { process.outputStream.write("stop\n".toByteArray());process.outputStream.flush() }
         send(RunnerMessage("state",id,"STOPPING",version(),"저장 후 종료 중",pid=process.pid()))
+        return true
+    }
+    private fun stopIfEmpty(id:String,requestId:String) {
+        val process=processes[id];val counter=activity[id];val before=counter?.get()
+        val config=configs[id]
+        val count=if(process?.isAlive==true&&id in ready&&id !in stopping&&config!=null)query.currentCount(config.port) else null
+        val accepted=process!=null&&counter!=null&&processes[id]===process&&process.isAlive&&id in ready&&id !in stopping&&counter.get()==before&&count==0&&stop(id)
+        send(RunnerMessage("idle-result",instanceId=id,state=if(accepted)"ACCEPTED" else "DENIED",detail=requestId))
     }
     private fun command(id:String,value:String) {
         if(value.isBlank() || value.length>4096 || value.contains('\n') || value.contains('\r')) return

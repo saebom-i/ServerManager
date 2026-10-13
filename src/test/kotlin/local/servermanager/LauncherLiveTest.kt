@@ -33,6 +33,7 @@ class LauncherLiveTest {
         }) {println(it)}
         val settings=Properties().apply {
             setProperty("server-ip","127.0.0.1");setProperty("server-port",instance.port.toString())
+            setProperty("enable-query","true");setProperty("query.port",instance.port.toString())
             setProperty("online-mode","true");setProperty("level-type","minecraft:flat");setProperty("generate-structures","false")
             setProperty("view-distance","2");setProperty("simulation-distance","2");setProperty("max-players","2")
         }
@@ -44,6 +45,12 @@ class LauncherLiveTest {
         try {
             assertTrue(ready.await(180,TimeUnit.SECONDS),"$loader did not reach RUNNING: "+synchronized(lines){lines.takeLast(20).joinToString("\n")})
             assertTrue(process.isAlive)
+            // Vanilla/Fabric log Done before their Query listener is bound.
+            val query=MinecraftQuery();val queryDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10)
+            var count=query.currentCount(instance.port)
+            while(count==null && System.nanoTime()<queryDeadline){Thread.sleep(50);count=query.currentCount(instance.port)}
+            assertEquals(0,count,"Current basic count must work with the actual $loader server")
+            assertEquals(0,MinecraftQuery().players(instance.port)?.count,"Full stat must work with the actual $loader server")
             process.outputStream.write("list\nstop\n".toByteArray());process.outputStream.flush()
             assertTrue(process.waitFor(60,TimeUnit.SECONDS),"Normal stop was delayed; not force-killing")
             assertEquals(0,process.exitValue(),synchronized(lines){lines.takeLast(20).joinToString("\n")})

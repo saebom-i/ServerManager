@@ -17,7 +17,8 @@ async function fixture(page:Page){
   else if(path==='/api/admin/game-network'){
    if(req.method()==='PUT'){const payload=req.postDataJSON();payloads.push(payload);network=payload.config;revision++;tokenConfigured=!payload.clearToken&&(!!payload.token||tokenConfigured);result={config:network,revision,tokenConfigured};}
    else result={settings:{config:network,revision,tokenConfigured},dnsMessage:'DNS 설정 대기'};
-  } else if(path.endsWith('/game-domain')){network.labels[path.split('/')[3]]=req.postDataJSON().label;revision++;}
+  } else if(path.endsWith('/power-saving')){const row=created.find(r=>r.config.id===path.split('/')[3]);row.powerSaving={...row.powerSaving,config:req.postDataJSON(),status:req.postDataJSON().enabled?'WAITING':'OFF'};result=row.powerSaving;}
+  else if(path.endsWith('/game-domain')){network.labels[path.split('/')[3]]=req.postDataJSON().label;revision++;}
   else if(path.endsWith('/event-page'))result={events:[],hasOlder:false};
   await route.fulfill({json:result});
  });
@@ -37,6 +38,18 @@ test('create dialog selects all five software types without stale version choice
   await expect(page.getByRole('button',{name:loader+' 설치',exact:true})).toBeVisible();
  }
  expect(f.created[0].config.minecraft).toBe('1.21.4');expect(f.created[0].config.loaderVersion).toBe('21.4.111');
+});
+
+test('power saving stays opt-in, accepts running-server drafts without poll resets and shows unknown counts',async({page})=>{
+ const f=await fixture(page);const power={config:{enabled:false,minutes:30},status:'OFF',emptySeconds:0,remainingSeconds:null,lastStopReason:null};
+ f.created.push({config:{id:'a',name:'절전 서버',loader:'NeoForge',minecraft:'1.21.1',loaderVersion:'21.1.252',memoryMb:512,port:25565,runnerId:null},state:'RUNNING',pid:42,powerSaving:power});
+ await page.goto('/');await expect(page.getByTestId('power-saving-status')).toHaveText('무인 절전 꺼짐');
+ await page.getByRole('button',{name:'서버 설정',exact:true}).click();const toggle=page.getByLabel('무인 자동 종료');const minutes=page.getByLabel('무인 종료 대기 시간 (분)');
+ await expect(toggle).not.toBeChecked();await toggle.check();await minutes.fill('45');await page.waitForTimeout(2500);await expect(toggle).toBeChecked();await expect(minutes).toHaveValue('45');
+ await page.getByRole('button',{name:'절전 설정 저장',exact:true}).click();await expect(page.getByText('무인 절전 설정을 저장했습니다.',{exact:true})).toBeVisible();
+ expect(f.created[0].powerSaving.config).toEqual({enabled:true,minutes:45});
+ f.created[0].powerSaving={...f.created[0].powerSaving,status:'UNKNOWN'};await expect(page.getByTestId('power-saving-status')).toContainText('인원 확인 불가');
+ await minutes.fill('29');await expect(page.getByRole('button',{name:'절전 설정 저장',exact:true})).toBeDisabled();
 });
 
 test('network token stays masked and per-server domain editing leaves shared port fixed',async({page})=>{
