@@ -16,6 +16,56 @@ import java.util.Collections
 import kotlin.test.*
 
 class RunnerGatewayTest {
+    @Test fun `two computers share one public port without mixing streams and one stop leaves the other online`() {
+        val port=ServerSocket(0).use {it.localPort}
+        val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java);val network=mock(GameNetwork::class.java)
+        `when`(network.config()).thenReturn(GameNetworkConfig(enabled=true,port=port,baseDomain="server.example.com"))
+        `when`(network.resolve("alpha.server.example.com")).thenReturn("alpha")
+        `when`(network.resolve("beta.server.example.com")).thenReturn("beta")
+        val gateway=RunnerGateway(registry,manager,network);val mapper=jacksonObjectMapper()
+        val sent=mutableMapOf<String,MutableList<WebSocketMessage<*>>>()
+        fun session(id:String,instance:String,platform:String):WebSocketSession {
+            val device=RunnerDevice(id,id,platform,"user","key","now",version="0.4.0-beta.5",allowedInstanceIds=setOf(instance))
+            `when`(registry.active(id)).thenReturn(device);`when`(registry.online(id)).thenReturn(true)
+            val session=mock(WebSocketSession::class.java);`when`(session.attributes).thenReturn(mutableMapOf<String,Any>("runnerId" to id));`when`(session.isOpen).thenReturn(true)
+            val messages=Collections.synchronizedList(mutableListOf<WebSocketMessage<*>>());sent[id]=messages
+            doAnswer {messages.add(it.arguments[0] as WebSocketMessage<*>);null}.`when`(session).sendMessage(any())
+            gateway.afterConnectionEstablished(session);return session
+        }
+        val a=session("mac","alpha","MAC");val b=session("windows","beta","WINDOWS")
+        val alpha=Instance("alpha","Alpha",loader="Fabric",loaderVersion="0.16.10",port=25565,memoryMb=512,javaPath="java",runnerId="mac")
+        val beta=alpha.copy(id="beta",name="Beta",loader="Paper",loaderVersion="133",runnerId="windows")
+        gateway.start(alpha);gateway.start(beta)
+        fun <T> await(value:()->T?):T {
+            val deadline=System.nanoTime()+Duration.ofSeconds(5).toNanos()
+            while(System.nanoTime()<deadline){value()?.let {return it};Thread.sleep(10)}
+            error("중계 응답 시간 초과")
+        }
+        fun open(player:Socket,id:String,session:WebSocketSession,host:String):Pair<Int,ByteArray> {
+            player.soTimeout=3000
+            val raw=GameNetworkTest().handshake(host);player.getOutputStream().write(raw)
+            val frame=await {synchronized(sent.getValue(id)){sent.getValue(id).filterIsInstance<TextMessage>().map {mapper.readValue<RunnerMessage>(it.payload)}.firstOrNull {it.type=="open"}}}
+            val stream=frame.streamId!!
+            gateway.handleMessage(session,TextMessage(mapper.writeValueAsString(RunnerMessage("opened",streamId=stream))))
+            val binary=await {synchronized(sent.getValue(id)){sent.getValue(id).filterIsInstance<BinaryMessage>().firstOrNull {it.payload.asReadOnlyBuffer().int==stream}}}
+            val bytes=binary.payload.asReadOnlyBuffer();assertEquals(stream,bytes.int);assertContentEquals(raw,ByteArray(bytes.remaining()).also {bytes.get(it)})
+            return stream to raw
+        }
+        fun downstream(session:WebSocketSession,stream:Int,text:String)=gateway.handleMessage(session,BinaryMessage(ByteBuffer.allocate(4+text.length).putInt(stream).put(text.toByteArray()).flip()))
+        try {
+            Socket("127.0.0.1",port).use { pa -> Socket("127.0.0.1",port).use {pb ->
+                val (sa,_)=open(pa,"mac",a,"alpha.server.example.com\u0000FML3\u0000")
+                val (sb,_)=open(pb,"windows",b,"beta.server.example.com")
+                assertNotEquals(sa,sb)
+                downstream(b,sa,"leak");pa.soTimeout=100
+                assertFailsWith<java.net.SocketTimeoutException>{pa.getInputStream().read()};pa.soTimeout=3000
+                downstream(a,sa,"a");downstream(b,sb,"b")
+                assertEquals('a'.code,pa.getInputStream().read());assertEquals('b'.code,pb.getInputStream().read())
+                gateway.completed(alpha);downstream(b,sb,"c");assertEquals('c'.code,pb.getInputStream().read())
+                Socket("127.0.0.1",port).use {unknown->unknown.soTimeout=3000;unknown.getOutputStream().write(GameNetworkTest().handshake("unknown.server.example.com"));assertEquals(-1,unknown.getInputStream().read())}
+            } }
+        } finally {gateway.completed(alpha);gateway.completed(beta)}
+    }
     @Test fun `public game socket relays bytes to and from authorized runner`() {
         val port=ServerSocket(0).use { it.localPort }
         val manager=mock(ServerManager::class.java)

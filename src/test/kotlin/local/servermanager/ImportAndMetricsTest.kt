@@ -40,7 +40,7 @@ class ImportAndMetricsTest {
         assertFalse(out.resolve("config/client.txt").exists())
     }
     @Test fun `unsupported loaders and traversal are rejected before instance creation`() {
-        assertFailsWith<IllegalArgumentException> { PackFormat.inspect(archive(deps=mapOf("minecraft" to "1.21.1","fabric-loader" to "0.16.0"))) }
+        assertFailsWith<IllegalArgumentException> { PackFormat.inspect(archive(deps=mapOf("minecraft" to "1.21.1","quilt-loader" to "0.26.0"))) }
         assertFailsWith<IllegalArgumentException> { PackFormat.inspect(archive(extra=mapOf("overrides/../../escape" to "bad"))) }
         for(path in listOf("../escape","/tmp/escape","C:/escape","a\\b")) assertFailsWith<IllegalArgumentException> { PackFormat.relative(path) }
         assertFailsWith<IllegalArgumentException> { PackFormat.url("http://localhost/private") }

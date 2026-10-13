@@ -159,7 +159,9 @@ class RunnerApi(private val registry:RunnerRegistry,private val auth:AuthStore,p
     @DeleteMapping("/{id}/allow/{instanceId}") fun disallow(@PathVariable id:String,@PathVariable instanceId:String,authentication:Authentication,req:HttpServletRequest) {
         fresh(req);registry.allow(authentication.name,id,instanceId,false)
     }
-    @DeleteMapping("/{id}") fun revoke(@PathVariable id:String,authentication:Authentication,req:HttpServletRequest) {
+    // Leave /connect exclusively to the WebSocket handler. An unconstrained
+    // MVC DELETE /{id} also matches GET /connect and returns 405 before upgrade.
+    @DeleteMapping("/{id:[a-f0-9-]{36}}") fun revoke(@PathVariable id:String,authentication:Authentication,req:HttpServletRequest) {
         fresh(req);registry.revoke(authentication.name,id)
     }
 }

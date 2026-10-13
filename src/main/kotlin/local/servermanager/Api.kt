@@ -17,10 +17,11 @@ data class RunnerAssignment(val runnerId:String?)
 
 @RestController
 @RequestMapping("/api")
-class Api(private val manager: ServerManager,private val accounts:AuthStore,private val runners:RunnerRegistry) {
+class Api(private val manager: ServerManager,private val accounts:AuthStore,private val runners:RunnerRegistry,private val network:GameNetwork) {
     @GetMapping("/health") fun health()=mapOf("status" to "ok", "mode" to "local", "dataDirectory" to manager.root.toString(), "javaPath" to System.getProperty("java.home")+"/bin/java")
     @GetMapping("/versions") fun versions()=manager.versions()
-    @GetMapping("/version-catalog") fun versionCatalog(@RequestParam(defaultValue="false") refresh: Boolean)=manager.versionCatalog(refresh)
+    @GetMapping("/version-catalog") fun versionCatalog(@RequestParam(defaultValue="false") refresh:Boolean,@RequestParam(defaultValue="NeoForge") loader:String,@RequestParam(defaultValue="1.21.1") minecraft:String)=manager.versionCatalog(refresh,loader,minecraft)
+    @GetMapping("/minecraft-versions") fun minecraftVersions(@RequestParam(defaultValue="NeoForge") loader:String,@RequestParam(defaultValue="false") refresh:Boolean)=manager.minecraftVersions(loader,refresh)
     @GetMapping("/memory") fun memory()=manager.capacity()
     @GetMapping("/instances") fun list(authentication:org.springframework.security.core.Authentication)=manager.list().filter { accounts.allowed(authentication.name,(it["config"] as Instance).id,false) }
     @PostMapping("/instances") fun create(@RequestBody req: CreateRequest)=manager.create(req)
@@ -32,7 +33,7 @@ class Api(private val manager: ServerManager,private val accounts:AuthStore,priv
     @DeleteMapping("/instances/{id}") fun deleteInstance(@PathVariable id:String,request:jakarta.servlet.http.HttpServletRequest):Map<String,Any> {
         val verified=request.getSession(false)?.getAttribute("sm.verified") as? Long ?: 0
         if(System.currentTimeMillis()-verified>5*60*1000)throw org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.PRECONDITION_REQUIRED,"서버 삭제 전에 패스키로 다시 인증하세요")
-        val result=manager.deleteInstance(id);accounts.removeInstancePermissions(id);runners.removeInstance(id);return result
+        val result=manager.deleteInstance(id);accounts.removeInstancePermissions(id);runners.removeInstance(id);network.removeInstance(id);return result
     }
     @PostMapping("/instances/{id}/install") fun install(@PathVariable id: String): Map<String,String> { manager.install(id); return mapOf("status" to "INSTALLING") }
     @PostMapping("/instances/{id}/start") fun start(@PathVariable id: String)=manager.start(id)

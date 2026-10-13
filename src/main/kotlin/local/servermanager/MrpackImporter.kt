@@ -23,7 +23,7 @@ import java.util.zip.ZipFile
 import kotlin.io.path.*
 
 data class PackFile(val path: String, val hashes: Map<String,String>, val downloads: List<String>, val fileSize: Long, val server: String)
-data class PackPlan(val name: String, val version: String, val minecraft: String, val loaderVersion: String, val files: List<PackFile>, val overrides: List<String>, val warnings: List<String>)
+data class PackPlan(val name: String, val version: String, val minecraft: String, val loaderVersion: String, val files: List<PackFile>, val overrides: List<String>, val warnings: List<String>,val loader:String="NeoForge")
 data class PackPreview(val token: String, val plan: PackPlan, val expiresAt: String)
 data class PackImportRequest(val token: String, val name: String, val port: Int, val memoryMb: Int, val javaPath: String, val excludeClientOnly: Boolean = true)
 
@@ -60,9 +60,12 @@ object PackFormat {
         val node = zip.getInputStream(index).use { mapper.readTree(it.readNBytes(8*1024*1024+1)) }
         require(node.path("formatVersion").asInt() == 1 && node.path("game").asText() == "minecraft") { "Minecraft mrpack formatVersion 1만 지원합니다" }
         val deps = node.path("dependencies")
-        require(deps.path("minecraft").asText() == "1.21.1" && deps.path("neoforge").asText().matches(Regex("21\\.1\\.[0-9]+(?:-beta)?")) && deps.fieldNames().asSequence().all { it in setOf("minecraft","neoforge") }) {
-            "현재 가져오기는 Minecraft 1.21.1 + NeoForge 팩을 지원합니다. 이 팩의 dependencies: $deps"
-        }
+        val names=mapOf("neoforge" to "NeoForge","forge" to "Forge","fabric-loader" to "Fabric")
+        val frameworks=deps.fieldNames().asSequence().filter {it in names}.toList()
+        require(frameworks.size==1 && deps.fieldNames().asSequence().all {it=="minecraft" || it in names}) { "mrpack은 NeoForge·Forge·Fabric 중 한 로더를 지정해야 합니다" }
+        val loader=names.getValue(frameworks.single())
+        val minecraft=deps.path("minecraft").asText();val loaderVersion=deps.path(frameworks.single()).asText()
+        Launchers.validate(loader,minecraft,loaderVersion)
         require(node.path("files").isArray) { "팩 files 목록이 없습니다" }
         val paths = mutableSetOf<String>()
         val files = node.path("files").map { f ->
@@ -85,7 +88,7 @@ object PackFormat {
             if(files.any { it.server == "optional" }) add("서버 optional 파일은 포함합니다.")
             add("환경 정보가 없거나 모드 메타데이터가 불확실한 파일은 보수적으로 유지합니다.")
         }
-        PackPlan(node.path("name").asText("가져온 모드팩"),node.path("versionId").asText(),"1.21.1",deps.path("neoforge").asText(),files,overrides,warnings)
+        PackPlan(node.path("name").asText("가져온 모드팩"),node.path("versionId").asText(),minecraft,loaderVersion,files,overrides,warnings,loader)
     }
 
     fun copyBounded(input: InputStream, output: Path, limit: Long): Long {
@@ -182,7 +185,7 @@ class MrpackImporter(private val manager: ServerManager) {
         require(zip.exists() && Instant.now().isBefore(Files.getLastModifiedTime(zip).toInstant().plusSeconds(86400))) { "팩 미리보기가 만료되었습니다. 다시 업로드하세요" }
         val plan=PackFormat.inspect(zip)
         synchronized(this) { require(!dir.resolve("consumed").exists()) { "이미 사용한 팩입니다. 다시 업로드하세요" };dir.resolve("consumed").createFile() }
-        val row=try { manager.create(CreateRequest(req.name,plan.loaderVersion,req.port,req.memoryMb,req.javaPath)) } catch(e:Exception) { dir.resolve("consumed").deleteIfExists();throw e }
+        val row=try { manager.create(CreateRequest(req.name,plan.loaderVersion,req.port,req.memoryMb,req.javaPath,plan.loader,plan.minecraft)) } catch(e:Exception) { dir.resolve("consumed").deleteIfExists();throw e }
         val id=(row.getValue("config") as Instance).id;val r=manager.runtime(id)
         manager.root.resolve(id).resolve("import.pending").writeText(req.token)
         synchronized(r) { r.state="IMPORTING";r.event("system","mrpack 가져오기: ${plan.name} ${plan.version}") }
@@ -202,11 +205,11 @@ class MrpackImporter(private val manager: ServerManager) {
                     val dest=manager.serverDir(id).resolve(stage.relativize(src));dest.parent.createDirectories();Files.move(src,dest,StandardCopyOption.REPLACE_EXISTING)
                 } }
                 synchronized(r) { r.state="NEW" }
-                manager.update(id,CreateRequest(req.name,plan.loaderVersion,req.port,req.memoryMb,req.javaPath))
+                manager.update(id,CreateRequest(req.name,plan.loaderVersion,req.port,req.memoryMb,req.javaPath,plan.loader,plan.minecraft))
                 manager.acceptEula(id)
                 manager.root.resolve(id).resolve("mrpack.json").writeText(mapper.writeValueAsString(plan))
                 manager.root.resolve(id).resolve("import.pending").deleteExisting()
-                r.event("system","모드팩 파일 검증 완료. NeoForge 설치를 시작합니다.")
+                r.event("system","모드팩 파일 검증 완료. ${plan.loader} 설치를 시작합니다.")
                 manager.install(id)
                 dir.toFile().deleteRecursively()
             } catch(e:Exception) {

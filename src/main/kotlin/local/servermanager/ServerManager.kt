@@ -20,7 +20,7 @@ import java.net.http.HttpResponse
 import kotlin.io.path.*
 
 data class Instance(val id: String, var name: String, val loader: String = "NeoForge", val minecraft: String = "1.21.1", var loaderVersion: String, var port: Int, var memoryMb: Int, var javaPath: String, var runnerId:String?=null)
-data class CreateRequest(val name: String, val loaderVersion: String, val port: Int = 25565, val memoryMb: Int = 2048, val javaPath: String = System.getProperty("java.home") + "/bin/java")
+data class CreateRequest(val name: String, val loaderVersion: String, val port: Int = 25565, val memoryMb: Int = 2048, val javaPath: String = System.getProperty("java.home") + "/bin/java", val loader:String="NeoForge",val minecraft:String="1.21.1")
 data class Event(val seq: Long, val time: String, val kind: String, val text: String)
 data class FileEntry(val name: String, val path: String, val directory: Boolean, val size: Long)
 data class MemoryCapacity(val totalMb: Long, val freeMb: Long, val reservedMb: Long, val maxHeapMb: Long, val committedHeapMb: Long, val startableHeapMb: Long)
@@ -31,6 +31,7 @@ interface RemoteController {
     fun restart(instance:Instance)
     fun command(instance:Instance,value:String)
     fun completed(instance:Instance) {}
+    fun sharedGamePort():Int?=null
 }
 
 class RuntimeState {
@@ -61,6 +62,8 @@ class ServerManager {
     private val workers = Executors.newCachedThreadPool()
     private val http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).connectTimeout(java.time.Duration.ofSeconds(20)).build()
     private val catalog by lazy { VersionCatalog(root.resolve("neoforge-versions.json")) }
+    private val software by lazy { LauncherCatalog(root.resolve("launcher-catalogs")) }
+    private val installer by lazy { LauncherInstaller(software) }
     private val metrics = ProcessMetrics()
     private val query = MinecraftQuery()
     private val signalListeners = java.util.concurrent.CopyOnWriteArrayList<(ServerSignal)->Unit>()
@@ -108,6 +111,14 @@ class ServerManager {
         Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
     }
     fun list() = instances.values.sortedBy { it.name }.map { view(it.id) }
+    @Synchronized fun <T> withIdle(action:()->T):T {
+        check(list().all { it["pid"]==null && it["state"] in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED") }) { "모든 서버와 작업을 종료한 뒤 네트워크 설정을 변경하세요" }
+        return action()
+    }
+    @Synchronized fun <T> withStopped(id:String,action:()->T):T {
+        val r=runtime(id)
+        synchronized(r) {checkIdle(r);check(r.state in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED"));return action()}
+    }
     fun capacity(excluding: String? = null): MemoryCapacity {
         val os=java.lang.management.ManagementFactory.getOperatingSystemMXBean() as com.sun.management.OperatingSystemMXBean
         val total=os.totalMemorySize / (1024*1024)
@@ -122,7 +133,7 @@ class ServerManager {
     }
     private fun validate(req: CreateRequest) {
         require(req.name.isNotBlank() && req.name.length <= 80) { "이름은 1~80자로 입력하세요" }
-        require(req.loaderVersion.matches(Regex("21\\.1\\.[0-9]+(?:-beta)?"))) { "1.21.1용 NeoForge 21.1.x 버전을 선택하세요" }
+        Launchers.validate(req.loader,req.minecraft,req.loaderVersion)
         require(req.port in 1024..65535) { "포트 범위는 1024~65535입니다" }
         val capacity=capacity()
         require(req.memoryMb.toLong() in 512L..capacity.maxHeapMb) { "이 Mac의 메모리 설정 범위는 512~${capacity.maxHeapMb} MiB입니다 (물리 ${capacity.totalMb} MiB, OS 여유 ${capacity.reservedMb} MiB)" }
@@ -130,8 +141,8 @@ class ServerManager {
     }
     @Synchronized fun create(req: CreateRequest): Map<String, Any?> {
         validate(req)
-        require(instances.values.none { it.port == req.port }) { "다른 인스턴스가 사용하는 포트입니다" }
-        val i = Instance(UUID.randomUUID().toString(), req.name, loaderVersion=req.loaderVersion, port=req.port, memoryMb=req.memoryMb, javaPath=req.javaPath)
+        require(remoteController?.sharedGamePort()!=null || instances.values.none { it.port == req.port }) { "다른 인스턴스가 사용하는 포트입니다" }
+        val i = Instance(UUID.randomUUID().toString(), req.name, loader=req.loader,minecraft=req.minecraft,loaderVersion=req.loaderVersion, port=req.port, memoryMb=req.memoryMb, javaPath=req.javaPath)
         serverDir(i.id).createDirectories(); instances[i.id] = i; runtimes[i.id] = RuntimeState()
         writeProperties(i); save(i); acceptEula(i.id); return view(i.id)
     }
@@ -140,8 +151,8 @@ class ServerManager {
         synchronized(r) {
             checkIdle(r)
             val i = instance(id)
-            require(req.loaderVersion == i.loaderVersion) { "설치된 로더 버전 변경은 새 인스턴스로 진행하세요" }
-            require(instances.values.none { it.id != id && it.port == req.port }) { "다른 인스턴스가 사용하는 포트입니다" }
+            require(req.loaderVersion == i.loaderVersion && req.loader==i.loader && req.minecraft==i.minecraft) { "설치된 로더 버전 변경은 새 인스턴스로 진행하세요" }
+            require(remoteController?.sharedGamePort()!=null || instances.values.none { it.id != id && it.port == req.port }) { "다른 인스턴스가 사용하는 포트입니다" }
             i.name=req.name; i.port=req.port; i.memoryMb=req.memoryMb; i.javaPath=req.javaPath
             writeProperties(i); save(i)
         }
@@ -184,7 +195,8 @@ class ServerManager {
     }
     fun acceptEula(id: String) { val r=runtime(id); synchronized(r) { checkIdle(r); serverDir(id).resolve("eula.txt").writeText("# Accepted through local UI at ${Instant.now()}\neula=true\n") } }
     fun versions(): List<String> = catalog.get().versions
-    fun versionCatalog(refresh: Boolean) = catalog.get(refresh)
+    fun versionCatalog(refresh: Boolean,loader:String="NeoForge",minecraft:String="1.21.1") = if(loader=="NeoForge" && minecraft=="1.21.1")catalog.get(refresh) else software.versions(loader,minecraft,refresh)
+    fun minecraftVersions(loader:String,refresh:Boolean=false)=software.games(loader,refresh)
     private fun fetch(url: String): String {
         val res=http.send(HttpRequest.newBuilder(URI(url)).timeout(java.time.Duration.ofMinutes(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
         check(res.statusCode()==200) { "다운로드 실패: HTTP ${res.statusCode()}" }; return res.body()
@@ -193,26 +205,18 @@ class ServerManager {
         val i=instance(id); val r=runtime(id)
         synchronized(r) {
             checkIdle(r); require(r.state != "IMPORT_FAILED") { "실패한 팩은 원본 mrpack에서 다시 가져오세요" }; require(!root.resolve(id).resolve("installed.ok").exists()) { "이미 설치된 인스턴스입니다" }
-            r.state="INSTALLING"; r.event("system", "NeoForge ${i.loaderVersion} 다운로드 중")
+            r.state="INSTALLING"; r.event("system", "${i.loader} ${i.loaderVersion} 설치 준비 중")
         }
         workers.submit {
             try {
-                val javaVersion=ProcessBuilder(i.javaPath,"-version").redirectErrorStream(true).start()
-                val versionText=javaVersion.inputStream.bufferedReader().readText(); javaVersion.waitFor()
-                require(Regex("version \"21[.\"]").containsMatchIn(versionText)) { "Minecraft 1.21.1은 Java 21을 사용하세요: $versionText" }
-                val url="https://maven.neoforged.net/releases/net/neoforged/neoforge/${i.loaderVersion}/neoforge-${i.loaderVersion}-installer.jar"
-                val jar=root.resolve(id).resolve("installer.jar")
-                val res=http.send(HttpRequest.newBuilder(URI(url)).timeout(java.time.Duration.ofMinutes(5)).build(),HttpResponse.BodyHandlers.ofFile(jar))
-                check(res.statusCode()==200) { "설치기 다운로드 실패: ${res.statusCode()}" }
-                val expected=fetch("$url.sha256").trim().substringBefore(' ')
-                val actual=java.security.MessageDigest.getInstance("SHA-256").digest(jar.readBytes()).joinToString("") { "%02x".format(it) }
-                check(expected.equals(actual,true)) { "설치기 체크섬 불일치" }
-                val p=ProcessBuilder(i.javaPath,"-jar",jar.toString(),"--installServer").directory(serverDir(id).toFile()).redirectErrorStream(true).start()
-                synchronized(r) { r.process=p }
-                consume(id,p)
-                val code=p.waitFor()
-                if(code==0) root.resolve(id).resolve("installed.ok").writeText(i.loaderVersion)
-                synchronized(r) { r.process=null; r.state=if(code==0) "STOPPED" else "FAILED"; r.event("system","설치 종료 (exit $code)") }
+                installer.install(i,serverDir(id),root.resolve(id).resolve("installer.jar"),{ args ->
+                    val p=ProcessBuilder(args).directory(serverDir(id).toFile()).redirectErrorStream(true).start()
+                    synchronized(r) { r.process=p }
+                    consume(id,p)
+                    p.waitFor().also { synchronized(r) { r.process=null } }
+                }) { text -> r.event("system",text) }
+                root.resolve(id).resolve("installed.ok").writeText(i.loaderVersion)
+                synchronized(r) { r.process=null;r.state="STOPPED";r.event("system","${i.loader} 설치 완료") }
             } catch(e: Exception) { synchronized(r) { r.process=null; r.state="FAILED"; r.event("error", e.message ?: "설치 실패") } }
         }
     }
@@ -229,13 +233,15 @@ class ServerManager {
                 r.event("system","실행기 ${i.runnerId}로 서버 데이터를 인계하고 있습니다")
                 return
             }
+            require(remoteController?.sharedGamePort()==null) { "공유 중계 모드에서는 별도 실행기를 등록하고 이 서버에 배정하세요" }
+            require(instances.values.none { other -> other.id!=id && other.runnerId==null && other.port==i.port && runtimes[other.id]?.process?.isAlive==true }) { "이 컴퓨터에서 같은 게임 포트를 사용하는 서버가 실행 중입니다" }
             val capacity=capacity(id)
             require(i.memoryMb.toLong() in 512L..capacity.startableHeapMb) { "시작 가능한 최대 힙은 ${capacity.startableHeapMb} MiB입니다. 다른 실행 인스턴스가 ${capacity.committedHeapMb} MiB를 예약하고 있습니다" }
-            val args=serverDir(id).resolve("libraries/net/neoforged/neoforge/${i.loaderVersion}/unix_args.txt")
-            require(args.exists()) { "먼저 NeoForge를 설치하세요" }
+            val args=Launchers.arguments(i,serverDir(id))
+            Launchers.verifyJava(i.javaPath,Launchers.requiredJava(i,serverDir(id)))
             ServerSocket(i.port,1,InetAddress.getByName("127.0.0.1")).use { }
             writeProperties(i)
-            val p=ProcessBuilder(i.javaPath,"-Xms512M","-Xmx${i.memoryMb}M","@${args}","nogui").directory(serverDir(id).toFile()).redirectErrorStream(true).start()
+            val p=ProcessBuilder(args).directory(serverDir(id).toFile()).redirectErrorStream(true).start()
             r.process=p; r.state="STARTING"; r.players=null; r.event("system","서버 시작 · 127.0.0.1:${i.port} · PID ${p.pid()}")
             workers.submit {
                 consume(id,p); val code=p.waitFor()
@@ -297,6 +303,17 @@ class ServerManager {
         val i=instance(id);if(i.runnerId!=runnerId || state !in setOf("STARTING","RUNNING","STOPPING","SYNCING","SYNC_FAILED","UNKNOWN")) return
         val r=runtime(id)
         synchronized(r) { r.state=state;detail?.take(1000)?.let { r.event("system",it) } }
+    }
+    fun remoteStartFailed(id:String,runnerId:String,detail:String?) {
+        val i=instance(id);if(i.runnerId!=runnerId)return
+        val r=runtime(id)
+        synchronized(r) {
+            if(r.state!="TRANSFERRING" || r.remotePid!=null)return
+            root.resolve(id).resolve("remote-lease").deleteIfExists()
+            r.state="FAILED";r.remoteRestartRequested=false
+            r.event("error",detail?.take(1000) ?: "실행기에서 서버를 시작하지 못했습니다")
+            remoteController?.completed(i)
+        }
     }
     fun remoteWorkerReady(id:String,runnerId:String) {
         if(instance(id).runnerId!=runnerId)return

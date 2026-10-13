@@ -14,6 +14,7 @@ import java.io.FileOutputStream
 import java.io.PrintStream
 import java.nio.charset.StandardCharsets
 import java.net.Socket
+import java.net.ServerSocket
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
@@ -127,6 +128,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     private val configs=ConcurrentHashMap<String,Instance>()
     private val uploading=ConcurrentHashMap.newKeySet<String>()
     private val stopping=ConcurrentHashMap.newKeySet<String>()
+    private val ready=ConcurrentHashMap.newKeySet<String>()
     private val query=MinecraftQuery()
     private val metrics=ProcessMetrics()
     private fun instanceRoot(id:String)=home.resolve("instances").resolve(id)
@@ -245,7 +247,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     }
     private fun openGame(instanceId:String,streamId:Int) {
         val port=configs[instanceId]?.port ?: return
-        if(processes[instanceId]?.isAlive!=true || gameStreams.size>=100)return
+        if(processes[instanceId]?.isAlive!=true || instanceId !in ready || gameStreams.size>=100)return
         workers.submit {
             val socket=Socket()
             try {
@@ -272,6 +274,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     }
     private fun encode(value:String)=URLEncoder.encode(value,Charsets.UTF_8)
     private fun beginStart(id:String,rawConfig:String) {
+        var spawned=false
         try {
             check(processes[id]?.isAlive!=true) { "이미 실행 중입니다" }
             check(!dirty(id).exists()) { "이전 실행의 데이터 인계가 완료되지 않았습니다" }
@@ -282,8 +285,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             root.resolve("instance.json").writeText(mapper.writeValueAsString(instance))
             send(RunnerMessage("state",id,"TRANSFERRING",version(),"서버 파일을 받고 있습니다"))
             pull(id)
-            startProcess(instance)
-        } catch(e:Exception) { send(RunnerMessage("state",id,"SYNC_FAILED",version(),e.message?.take(300) ?: "시작 실패")) }
+            startProcess(instance) {spawned=true}
+        } catch(e:Exception) {
+            val state=if(!spawned && processes[id]?.isAlive!=true && !dirty(id).exists())"START_FAILED" else "SYNC_FAILED"
+            send(RunnerMessage("state",id,state,version(),e.message?.take(300) ?: "시작 실패"))
+        }
     }
     private fun pull(id:String) {
         val response=http("GET","/api/runners/transfer/$id/manifest")
@@ -318,22 +324,25 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             } else Files.move(stage,current,ATOMIC_MOVE)
         } finally { if(stage.exists())stage.toFile().deleteRecursively() }
     }
-    private fun startProcess(instance:Instance) {
+    private fun startProcess(instance:Instance,onSpawned:()->Unit) {
         val id=instance.id
         val current=processes.values.filter { it.isAlive }.sumOf { p -> configs.values.firstOrNull { processes[it.id]===p }?.memoryMb?.toLong() ?: 0 }
         val os=java.lang.management.ManagementFactory.getOperatingSystemMXBean() as com.sun.management.OperatingSystemMXBean
         val limit=maxOf(0L,os.totalMemorySize/(1024*1024)-maxOf(1024L,os.totalMemorySize/(1024*1024)/10)-current)
         require(instance.memoryMb.toLong() in 512L..limit) { "실행기 메모리가 부족합니다 (최대 $limit MiB)" }
-        val args=serverDir(id).resolve("libraries/net/neoforged/neoforge/${instance.loaderVersion}/${if(identity.platform=="WINDOWS") "win_args.txt" else "unix_args.txt"}")
-        require(args.isRegularFile()) { "NeoForge 실행 파일이 없습니다" }
+        val java=javaBin()
+        val args=Launchers.arguments(instance,serverDir(id),java,identity.platform=="WINDOWS")
+        Launchers.verifyJava(java,Launchers.requiredJava(instance,serverDir(id)))
+        ServerSocket().use {it.bind(InetSocketAddress("127.0.0.1",instance.port))}
         val properties=serverDir(id).resolve("server.properties")
         val values=Properties();properties.inputStream().use { values.load(it) }
         values.setProperty("server-ip","127.0.0.1");values.setProperty("server-port",instance.port.toString())
         values.setProperty("enable-query","true");values.setProperty("query.port",instance.port.toString())
         properties.outputStream().use { values.store(it,"Server Manager Runner") }
-        val java=javaBin()
-        val process=ProcessBuilder(java,"-Xms512M","-Xmx${instance.memoryMb}M","@${args}","nogui")
+        ready.remove(id)
+        val process=ProcessBuilder(args)
             .directory(serverDir(id).toFile()).redirectErrorStream(true).start()
+        onSpawned()
         processes[id]=process
         dirty(id).writeText("${process.pid()}|${process.info().startInstant().orElse(Instant.now()).toEpochMilli()}")
         send(RunnerMessage("state",id,"STARTING",version(),"원격 Minecraft 서버 시작",pid=process.pid()))
@@ -345,9 +354,12 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                 val kind=if(line.contains("ERROR") || line.contains("Exception")) "error" else if(line.contains("WARN")) "warn" else "output"
                 writer.appendLine(line);writer.flush()
                 send(RunnerMessage("log",id,kind,version(),line.take(4096)))
-                if(line.contains("Done (") && line.contains("For help")) send(RunnerMessage("state",id,"RUNNING",version(),pid=process.pid()))
+                if(line.contains("Done (") && line.contains("For help") && processes[id]===process) {
+                    ready.add(id);send(RunnerMessage("state",id,"RUNNING",version(),pid=process.pid()))
+                }
             } } }
             val code=process.waitFor()
+            ready.remove(id)
             stopping.remove(id)
             processes.remove(id,process)
             send(RunnerMessage("state",id,"SYNCING",version(),"종료 코드 $code · 변경 파일 인계 중"))
@@ -396,7 +408,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         if(!process.isAlive)return
         val sample=metrics.sample(process.toHandle())
         val players=configs[id]?.let { query.players(it.port) }
-        send(RunnerMessage("state",id,if(id in stopping)"STOPPING" else "RUNNING",version(),pid=process.pid(),cpuPercent=sample.cpuPercent,rssMb=sample.rssMb,
+        send(RunnerMessage("state",id,if(id in stopping)"STOPPING" else if(id in ready)"RUNNING" else "STARTING",version(),pid=process.pid(),cpuPercent=sample.cpuPercent,rssMb=sample.rssMb,
             uptimeSeconds=sample.uptimeSeconds,playerCount=players?.count,players=players?.names))
     }
     private fun recoverStates() {

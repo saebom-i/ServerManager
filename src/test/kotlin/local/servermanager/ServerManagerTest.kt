@@ -49,6 +49,20 @@ class ServerManagerTest {
         val text=manager.serverDir(id).resolve("server.properties").readText()
         assertTrue(text.contains("server-port=31003")); assertTrue(text.contains("server-ip=127.0.0.1"))
     }
+    @Test fun `pre-start remote failure releases only its own lease and permits configuration recovery`() {
+        val id=instance();manager.assignRunner(id,"runner-a")
+        val state=manager.runtime(id);state.state="TRANSFERRING"
+        val lease=manager.root.resolve(id).resolve("remote-lease").also {it.writeText("runner-a")}
+        manager.remoteStartFailed(id,"runner-b","wrong runner")
+        assertTrue(lease.exists());assertEquals("TRANSFERRING",state.state)
+        manager.remoteStartFailed(id,"runner-a","Java version mismatch")
+        assertFalse(lease.exists());assertEquals("FAILED",state.state)
+        manager.update(id,CreateRequest("recover","21.1.219",31003,512))
+        state.state="RUNNING";state.remotePid=42;lease.writeText("runner-a")
+        manager.remoteStartFailed(id,"runner-a","late frame")
+        assertTrue(lease.exists());assertEquals("RUNNING",state.state)
+        state.state="STOPPED";state.remotePid=null;lease.deleteIfExists()
+    }
     @Test fun `writes blocked during installation and command line injection rejected`() {
         val id=instance(); manager.runtime(id).state="INSTALLING"
         assertFailsWith<IllegalStateException> { manager.write(id,"test.txt",byteArrayOf()) }

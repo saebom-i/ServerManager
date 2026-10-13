@@ -1,6 +1,6 @@
 # Server Manager
 
-macOS에서 Minecraft 1.21.1 / NeoForge 서버를 실행하고 콘솔과 파일을 관리하는 로컬 웹 프로그램입니다. Kotlin/Spring Boot와 React/TypeScript로 구현했습니다.
+Mac에서 Minecraft 관리 웹을 실행하고, Mac·Windows 실행기에 서버를 배정해 콘솔과 파일을 관리하는 프로그램입니다. NeoForge·Forge·Fabric·Paper·Vanilla를 지원합니다. Kotlin/Spring Boot와 React/TypeScript로 구현했습니다.
 
 패스키 로그인과 외부 접속 설정은 [SECURITY.md](SECURITY.md)를 참고하세요. 공개 URL은 기본적으로 빈 값이며 nginx는 직접 구성합니다.
 
@@ -12,7 +12,7 @@ macOS에서 Minecraft 1.21.1 / NeoForge 서버를 실행하고 콘솔과 파일�
 
 ## 소스에서 실행
 
-Java 21, Node.js 20.19+ 또는 22.12+가 필요합니다. 첫 빌드와 NeoForge 설치에는 인터넷 연결이 필요합니다.
+Java 21, Node.js 20.19+ 또는 22.12+가 필요합니다. 첫 빌드와 서버 소프트웨어 설치에는 인터넷 연결이 필요합니다.
 
 ```bash
 ./scripts/run-local.sh
@@ -34,9 +34,9 @@ Java를 명시하려면 `JAVA_HOME`을 지정하세요. Minecraft 프로세스�
 
 ## 사용 순서
 
-1. **서버 만들기**에서 이름, 공식 NeoForge 버전, Java 21 경로, 게임 포트, 최대 힙 메모리를 선택합니다.
-2. **NeoForge 설치**를 누르고 콘솔의 설치 진행을 확인합니다.
-3. 설치 완료 후 **시작**을 누릅니다. `Done` 로그를 확인하면 같은 Mac의 Minecraft 클라이언트에서 `127.0.0.1:설정포트`로 접속할 수 있습니다.
+1. **서버 만들기**에서 서버 종류, Minecraft·런처 버전, Java 경로, 내부 게임 포트와 최대 힙 메모리를 선택합니다.
+2. 선택한 종류의 **설치** 버튼을 누르고 콘솔의 설치 진행을 확인합니다. 공식 다운로드 해시와 필요한 Java 버전을 검사합니다.
+3. 설치 완료 후 실행기를 배정하고 **시작**을 누릅니다. 공유 중계가 꺼져 있을 때는 관리 Mac에서 로컬 실행도 가능합니다. 공유 중계 설정은 [INSTALL.md](INSTALL.md)의 게임 주소 절을 참고하세요.
 4. 콘솔에 `list`, `say hello` 등을 입력합니다. 명령과 출력은 별도로 표시됩니다.
 5. **종료** 후 파일 관리자에서 설정 파일을 편집하거나 모드 파일을 업로드합니다.
 
@@ -44,8 +44,10 @@ Java를 명시하려면 `JAVA_HOME`을 지정하세요. Minecraft 프로세스�
 
 ## 구현된 기능
 
-- 독립 인스턴스 생성, NeoForge 공식 버전 조회·설치, 설치기 SHA-256 검증
-- 여러 서버 실행, 정상 종료·재시작·강제 종료, 포트 충돌 검사
+- NeoForge·Forge·Fabric·Paper·Vanilla 공식 버전 조회·설치, 공식 SHA-256/SHA-1 및 파일 크기 검증
+- 초대 사용자 패스키 기반 Mac·Windows 실행기 등록, 서버별 사용 허용·배정과 온라인 상태
+- 공유 TCP 게임 포트, Minecraft 핸드셰이크 주소별 중계, 서버별 하위 도메인 및 Cloudflare DNS only A·SRV 자동 등록
+- 서로 다른 실행기에서 서버 실행, 정상 종료·재시작, 포트 충돌 검사. 한 컴퓨터의 여러 서버 동시 실행 확장은 [후속 이슈 #1](https://github.com/yoonseo6399/ServerManager/issues/1)
 - 실제 물리 메모리에 따른 동적 힙 상한: `물리 메모리 − max(1 GiB, 물리 메모리의 10%)`
 - 시작 시 다른 활성 인스턴스의 최대 힙 합산 검사. OS의 현재 여유 메모리는 변동하는 참고값으로 별도 표시
 - 입력·출력 구분, 최근 300줄부터 동적 조회, 이전 로그 페이지 로딩, 화면에 보이는 행만 렌더링, 검색·오류 필터·자동 스크롤, 스택 프레임의 메서드·소스 위치 요약, 프레임별 모드/Mixin 설정/클래스 상세
@@ -65,7 +67,7 @@ Java를 명시하려면 `JAVA_HOME`을 지정하세요. Minecraft 프로세스�
 .local-data/<instance-id>/
   instance.json       # 이름, 로더, 포트, 메모리, Java 경로
   installed.ok        # 설치 성공 표식
-  server/             # 월드, mods, 설정, NeoForge 런타임
+  server/             # 월드, mods, 설정, 선택한 런처 런타임
   console.log         # 원본 프로세스 출력 (실행 간 누적)
   backups/            # 덮어쓰기 전 파일 원본
   trash/              # UI에서 삭제한 파일 및 폴더
@@ -75,7 +77,7 @@ Java를 명시하려면 `JAVA_HOME`을 지정하세요. Minecraft 프로세스�
 
 파일 쓰기는 설치·실행·종료 중 차단합니다. 텍스트 편집은 2 MiB 이하, 업로드는 요청당 256 MiB까지 지원합니다. 다음 시작 시 UI의 포트와 로컬 전용 바인딩이 `server.properties`에 반영되므로 해당 값은 **서버 설정 UI**에서 바꾸세요.
 
-## 로그 파일 조회 (로컬 구현, 미배포)
+## 로그 파일 조회
 
 콘솔 위 **로그 파일** 메뉴에서 실시간 콘솔, 인스턴스의 `console.log`, Minecraft `server/logs/*.log`·`*.log.gz`, `server/crash-reports/*.txt`를 선택합니다. 파일은 300줄씩 이전/다음 페이지로 읽습니다. 검색은 현재 로드된 로그에 적용됩니다. 기록 중인 파일이 바뀌면 **로그 다시 불러오기**로 새로 조회하세요.
 
@@ -105,7 +107,7 @@ UI 개발은 `frontend`에서 `npm run dev`로 실행합니다. Vite는 `/api` �
 
 ## 이번 단계의 범위
 
-기본적으로 관리 웹과 게임 서버는 **127.0.0.1** 에 바인딩합니다. 관리 웹은 공개 HTTPS URL을 설정한 뒤 수신 주소를 변경할 수 있습니다. 패스키 인증·초대·권한·감사 기록을 적용했습니다. HTTPS와 nginx 라우팅은 사용자 설정이며, 다중 Mac 에이전트·모드 저장소 동기화는 후속 범위입니다. 설치본에는 Java가 포함됩니다. mrpack은 Minecraft 1.21.1 + NeoForge 팩의 검사·해시 확인·서버 overrides 적용·로더 설치를 지원합니다. Mixin 목록은 해당 클래스에 연결된 정보이며, 특정 메서드 변경이나 오류 원인을 단정하지 않습니다.
+관리 웹과 실행기 내부 Minecraft는 **127.0.0.1** 에 바인딩합니다. 원격 실행기는 관리 웹으로 먼저 WSS 연결을 맺습니다. 공유 게임 중계는 중앙 Mac의 설정한 포트를 공개 수신하며 웹 HTTPS/nginx와 별개입니다. 패스키·초대·권한·감사 기록을 적용했고, HTTPS·nginx·공유기 설정은 사용자가 구성합니다. 설치본과 실행기에는 Java 21이 포함되며, 더 높은 Java 버전이 필요한 Minecraft는 해당 컴퓨터의 런타임을 먼저 준비해야 합니다. mrpack은 NeoForge·Forge·Fabric 팩의 검사·해시 확인·서버 overrides 적용·로더 설치를 지원합니다. Mixin 목록은 해당 클래스에 연결된 정보이며, 특정 메서드 변경이나 오류 원인을 단정하지 않습니다.
 
 현재 여유 물리 메모리는 Java의 실제 네이티브 메모리 사용량이나 다른 앱의 향후 사용량을 보장하지 않습니다. 힙 외 오버헤드에 대한 여유는 위 예산으로 확보하되, 서버가 많으면 힙을 더 낮춰 사용하세요.
 
@@ -137,3 +139,12 @@ bash scripts/test-logs.sh
 - Mac과 관리 앱이 실행되어야 동작합니다. 관리 앱 자체가 중지되거나 Discord 연결이 끊긴 동안에는 명령·알림을 처리하지 못하며 과거 로그를 재전송하지 않습니다. 연결 상태 및 실패 안내는 관리자 화면에 표시됩니다. 토큰 없이도 앱의 다른 기능은 정상 작동합니다.
 
 BETA 설치는 BETA prerelease 업데이트를 확인하고, 정식 설치는 정식 릴리스만 확인합니다. 0.3.0의 런처는 BETA 버전을 이해하지 못하므로 첫 BETA 전환은 새 PKG로 설치하세요. 30~60분 무인 서버 절전, Modrinth 확장 및 모드 이진 탐색은 예약된 다음 개발 범위입니다.
+
+
+다섯 서버 종류의 실제 설치·시작·월드 저장 검증과 HTTPS/WSS 실행기·공유 TCP 통합 검증은 운영 계정·월드와 다른 임시 프로필에서 수행합니다. 테스트는 인터넷 연결과 Java 21을 사용합니다.
+
+```bash
+SM_LIVE_LAUNCHERS=1 ./gradlew test --tests local.servermanager.LauncherLiveTest
+# 최신 frontend build + bootJar 이후
+bash scripts/test-runners-live.sh
+```
