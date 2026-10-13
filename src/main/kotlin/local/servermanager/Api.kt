@@ -36,6 +36,14 @@ class Api(private val manager: ServerManager,private val accounts:AuthStore) {
     @PostMapping("/instances/{id}/command") fun command(@PathVariable id: String,@RequestBody req: CommandRequest)=manager.command(id,req.command)
     @GetMapping("/instances/{id}/events") fun events(@PathVariable id: String,@RequestParam(defaultValue="0") after: Long)=manager.events(id,after)
     @GetMapping("/instances/{id}/event-page") fun eventPage(@PathVariable id:String,@RequestParam(required=false) before:Long?,@RequestParam(required=false) after:Long?,@RequestParam(defaultValue="300") limit:Int)=manager.eventPage(id,before,after,limit)
+    @GetMapping("/instances/{id}/log-files") fun logFiles(@PathVariable id:String):ResponseEntity<List<LogFiles.Entry>> {
+        manager.instance(id)
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore()).body(LogFiles(manager.root.resolve(id)).list())
+    }
+    @GetMapping("/instances/{id}/log-file-page") fun logFilePage(@PathVariable id:String,@RequestParam path:String,@RequestParam(defaultValue="0") offset:Long,@RequestParam(defaultValue="300") limit:Int,@RequestParam(required=false) revision:String?):ResponseEntity<LogFiles.Page> {
+        manager.instance(id)
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore()).body(LogFiles(manager.root.resolve(id)).page(path,offset,limit,revision))
+    }
     @GetMapping("/instances/{id}/files") fun files(@PathVariable id: String,@RequestParam(defaultValue="") path: String)=manager.files(id,path)
     @GetMapping("/instances/{id}/text") fun text(@PathVariable id: String,@RequestParam path: String)=manager.text(id,path)
     @PutMapping("/instances/{id}/text") fun write(@PathVariable id: String,@RequestBody req: WriteRequest)=manager.write(id,req.path,req.content.toByteArray(),req.revision)

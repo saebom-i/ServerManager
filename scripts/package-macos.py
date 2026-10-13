@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Build a universal Intel + Apple Silicon .pkg, with verified Temurin 21 JREs."""
-import sys,os
+import sys,os,re
 import concurrent.futures, hashlib, json, pathlib, plistlib, shutil, subprocess, tarfile, urllib.request
 ROOT=pathlib.Path(__file__).resolve().parent.parent
 VERSION=(ROOT/'VERSION').read_text().strip()
+if not re.fullmatch(r'[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}(?:-beta\.[1-9][0-9]{0,5})?',VERSION): raise ValueError('Invalid version')
+MAC_VERSION=VERSION.split('-')[0]
 STAGE=ROOT/'build/macos-package'; CACHE=ROOT/'.runtime-cache'; DIST=ROOT/'dist'
 CACHE.mkdir(exist_ok=True); DIST.mkdir(exist_ok=True)
 def runtime(arch):
@@ -37,7 +39,7 @@ for arch,archive,version,digest in runtimes:
     target=resources/'runtimes'/arch; target.parent.mkdir(exist_ok=True);shutil.move(str(bundle),target)
     metadata.append({'architecture':arch,'java':version,'sha256':digest,'source':'Eclipse Temurin / Adoptium'})
 with (contents/'Info.plist').open('wb') as f:
-    plistlib.dump({'CFBundleName':'Server Manager','CFBundleDisplayName':'Server Manager','CFBundleIdentifier':'local.servermanager','CFBundleVersion':VERSION,'CFBundleShortVersionString':VERSION,'CFBundleExecutable':'ServerManager','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'11.0','NSHighResolutionCapable':True},f)
+    plistlib.dump({'CFBundleName':'Server Manager','CFBundleDisplayName':'Server Manager','CFBundleIdentifier':'local.servermanager','CFBundleVersion':MAC_VERSION,'CFBundleShortVersionString':MAC_VERSION,'CFBundleExecutable':'ServerManager','CFBundlePackageType':'APPL','LSMinimumSystemVersion':'11.0','NSHighResolutionCapable':True},f)
 (resources/'RUNTIMES.json').write_text(json.dumps(metadata,indent=2)+'\n')
 shutil.copy2(ROOT/'INSTALL.md',resources/'INSTALL.md')
 shutil.copy2(ROOT/'packaging/macos/choose-profile.applescript',resources/'choose-profile.applescript')
@@ -51,7 +53,7 @@ subprocess.run([str(java_home/'bin/jar'),'--create','--file',str(resources/'boot
 component=STAGE/'component.pkg'
 component_rules=STAGE/'components.plist'
 with component_rules.open('wb') as f: plistlib.dump([{'RootRelativeBundlePath':'Applications/Server Manager.app','BundleIsRelocatable':False,'BundleHasStrictIdentifier':True,'BundleOverwriteAction':'upgrade'}],f)
-subprocess.run(['/usr/bin/pkgbuild','--root',str(STAGE/'root'),'--identifier','local.servermanager','--version',VERSION,'--install-location','/','--component-plist',str(component_rules),'--scripts',str(ROOT/'packaging/macos/installer-scripts'),str(component)],check=True)
+subprocess.run(['/usr/bin/pkgbuild','--root',str(STAGE/'root'),'--identifier','local.servermanager','--version',MAC_VERSION,'--install-location','/','--component-plist',str(component_rules),'--scripts',str(ROOT/'packaging/macos/installer-scripts'),str(component)],check=True)
 output=DIST/f'ServerManager-{VERSION}-universal.pkg'
 subprocess.run(['/usr/bin/productbuild','--package',str(component),str(output)],check=True)
 (DIST/'SHA256SUMS').write_text(hashlib.sha256(output.read_bytes()).hexdigest()+'  '+output.name+'\n')

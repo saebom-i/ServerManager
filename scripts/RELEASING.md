@@ -1,6 +1,6 @@
 # Release checklist
 
-1. Update `VERSION` using a numeric `major.minor.patch` version.
+1. Update `VERSION` using `major.minor.patch` for stable or `major.minor.patch-beta.N` for BETA. BETA tags must be GitHub prereleases with `--latest=false`.
 2. Run frontend build, `./gradlew test bootJar`, and `python3 scripts/test-bootstrap.py` after packaging.
 3. Build with `python3 scripts/package-macos.py` and sign with `python3 scripts/prepare-release.py`.
 4. Publish the matching PKG, JAR, `update.properties`, `update.sig`, and `SHA256SUMS` together under tag `v<version>`.
@@ -11,3 +11,5 @@
 The GitHub Actions release workflow needs the `UPDATE_SIGNING_KEY` encrypted repository secret (base64 PKCS#8 DER). Setting this secret requires the owner's explicit approval. Without it, publish locally signed releases; installed apps can still download and apply them automatically.
 
 Automated application updates intentionally preserve the launcher and bundled Java. Increase the update protocol when a new bootstrap/runtime is required, and provide a new installer.
+
+BETA builds check prereleases as well as stable releases; stable builds only check stable releases. First BETA installation requires its PKG (the 0.3.0 launcher only understands numeric versions). macOS bundle/package metadata uses the numeric core; version.txt, signed manifests and the application show the full BETA version.

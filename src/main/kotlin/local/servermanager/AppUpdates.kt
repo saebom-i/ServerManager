@@ -17,9 +17,17 @@ import kotlin.io.path.*
 
 object SignedUpdates {
     fun compare(a:String,b:String):Int {
-        require(a.matches(Regex("[0-9]+\\.[0-9]+\\.[0-9]+"))&&b.matches(Regex("[0-9]+\\.[0-9]+\\.[0-9]+"))) { "잘못된 버전" }
-        return a.split('.').map(String::toInt).zip(b.split('.').map(String::toInt)).map { (x,y)->x.compareTo(y) }.firstOrNull { it!=0 } ?: 0
+        fun parts(value:String):List<Int> {
+            require(value.matches(Regex("[0-9]{1,6}\\.[0-9]{1,6}\\.[0-9]{1,6}(?:-beta\\.[1-9][0-9]{0,5})?"))) { "잘못된 버전" }
+            val core=value.substringBefore('-').split('.').map(String::toInt)
+            return core+if("-beta." in value) value.substringAfter("-beta.").toInt() else Int.MAX_VALUE
+        }
+        return parts(a).zip(parts(b)).map { (x,y)->x.compareTo(y) }.firstOrNull { it!=0 } ?: 0
     }
+    fun eligible(version:String,prerelease:Boolean,beta:Boolean):Boolean = runCatching {
+        compare(version,"0.0.0")
+        (beta || !prerelease) && (beta || "-beta." !in version) && (prerelease == ("-beta." in version))
+    }.getOrDefault(false)
     fun manifest(bytes:ByteArray,signature:ByteArray,key:ByteArray):Properties {
         val verifier=Signature.getInstance("Ed25519");verifier.initVerify(KeyFactory.getInstance("Ed25519").generatePublic(X509EncodedKeySpec(key)));verifier.update(bytes)
         require(verifier.verify(signature)) { "업데이트 서명을 확인할 수 없습니다" }
@@ -40,6 +48,7 @@ class AppUpdates(private val desktop:DesktopLifecycle) {
     private val mapper=jacksonObjectMapper()
     private val client=HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).connectTimeout(Duration.ofSeconds(15)).build()
     val current=javaClass.getResourceAsStream("/app-version.txt")!!.bufferedReader().use { it.readText().trim() }
+    val betaChannel="-beta." in current
     val repository=javaClass.getResourceAsStream("/update-repository.txt")!!.bufferedReader().use { it.readText().trim() }
     private val key=javaClass.getResourceAsStream("/update-public-key.der")!!.use { it.readAllBytes() }
     private val disabled=desktop.home.resolve("updates-disabled")
@@ -47,16 +56,20 @@ class AppUpdates(private val desktop:DesktopLifecycle) {
     @Volatile private var message="아직 확인하지 않았습니다"
     @Volatile private var checked:String?=null
     @Volatile private var checking=false
-    fun status()=mapOf("supported" to desktop.supervised,"enabled" to (desktop.supervised&&!disabled.exists()),"current" to current,"latest" to latest,"message" to message,"checkedAt" to checked,"checking" to checking,"repository" to "https://github.com/$repository")
+    fun status()=mapOf("supported" to desktop.supervised,"enabled" to (desktop.supervised&&!disabled.exists()),"current" to current,"channel" to if(betaChannel) "BETA" else "STABLE","latest" to latest,"message" to message,"checkedAt" to checked,"checking" to checking,"repository" to "https://github.com/$repository")
     @Synchronized fun enabled(value:Boolean){check(desktop.supervised);if(value){disabled.deleteIfExists()}else{atomicText(disabled,"disabled");desktop.home.resolve("updates/pending.txt").deleteIfExists()}}
     @Scheduled(initialDelay=60000,fixedDelay=21600000) fun periodic(){if(desktop.supervised&&!disabled.exists())checkNow()}
     @Synchronized fun checkNow():Map<String,Any?> {
         check(desktop.supervised) { "자동 업데이트는 설치 앱에서 지원합니다" }
         if(checking)return status();checking=true
         try {
-            val release=mapper.readTree(get(URI("https://api.github.com/repos/$repository/releases/latest"),1024*1024))
+            val response=mapper.readTree(get(URI("https://api.github.com/repos/$repository/releases"+(if(betaChannel) "?per_page=100" else "/latest")),4*1024*1024))
+            val releases=if(betaChannel) response.toList() else listOf(response)
+            val release=releases.filter { !it.path("draft").asBoolean() && SignedUpdates.eligible(it.path("tag_name").asText().removePrefix("v"),it.path("prerelease").asBoolean(),betaChannel) }
+                .maxWithOrNull { a,b->SignedUpdates.compare(a.path("tag_name").asText().removePrefix("v"),b.path("tag_name").asText().removePrefix("v")) }
+                ?: run { message="이 채널에 공개된 업데이트가 없습니다";return status() }
             val version=release.path("tag_name").asText().removePrefix("v");SignedUpdates.compare(version,current);latest=version;checked=Instant.now().toString()
-            if(release.path("draft").asBoolean()||release.path("prerelease").asBoolean()||SignedUpdates.compare(version,current)<=0){message="최신 버전입니다";return status()}
+            if(SignedUpdates.compare(version,current)<=0){message="최신 버전입니다";return status()}
             if(desktop.home.resolve("failed-update-version.txt").takeIf { it.exists() }?.readText()?.trim()==version){message="이 버전은 시작 검증에 실패해 자동 적용을 중지했습니다. 다음 릴리스를 기다리거나 설치 파일을 확인하세요.";return status()}
             val base="https://github.com/$repository/releases/download/v$version/"
             val manifest=get(URI(base+"update.properties"),65536);val signature=get(URI(base+"update.sig"),1024);val p=SignedUpdates.manifest(manifest,signature,key)

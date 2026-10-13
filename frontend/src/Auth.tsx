@@ -1,6 +1,7 @@
-import React,{createContext,useContext,useEffect,useRef,useState} from 'react';
+import React,{memo,createContext,useContext,useEffect,useRef,useState} from 'react';
 import {ShieldCheck,KeyRound,LogIn} from 'lucide-react';
 import {DesktopSettings} from './DesktopSettings';
+import {DiscordSettings} from './DiscordSettings';
 import {api,setCsrf,ApiError} from './http';
 
 type User={id:string;name:string;owner:boolean;permissions:Record<string,string>};
@@ -51,6 +52,7 @@ export function AuthGate({children}:{children:React.ReactNode}){
 }
 
 type Member={id:string;name:string;owner:boolean;enabled:boolean;registered:boolean;permissions:Record<string,string>};
+const AuditHistory=memo(function AuditHistory({logs}:{logs:any[]}){return <div className="audit-list">{logs.map((entry,index)=><div key={index}><time>{new Date(entry.at).toLocaleString()}</time><span>{entry.action}</span><strong>{entry.status}</strong></div>)}</div>;});
 export function SecurityPanel({instances}:{instances:{config:{id:string;name:string}}[]}){
  const auth=useAuth();const [members,setMembers]=useState<Member[]>([]),[keys,setKeys]=useState<{id:string;label:string;createdAt:string}[]>([]),[logs,setLogs]=useState<any[]>([]);
  const [startup,setStartup]=useState<{supported:boolean;enabled:boolean;dataDirectory:string}|null>(null);
@@ -64,7 +66,7 @@ export function SecurityPanel({instances}:{instances:{config:{id:string;name:str
  {auth.session.user?.owner&&<><hr/><h2>사용자 초대</h2><p>초대 코드는 24시간 동안 한 번 사용할 수 있습니다.</p><label className="security-label">사용자 이름<input value={name} onChange={e=>setName(e.target.value)}/></label><div className="permission-grid">{instances.map(({config:i})=><label key={i.id}>{i.name}<select value={grants[i.id]||''} onChange={e=>{const next={...grants};if(e.target.value)next[i.id]=e.target.value;else delete next[i.id];setGrants(next);}}><option value="">접근 불가</option><option value="VIEWER">조회만</option><option value="ADMIN">서버 관리</option></select></label>)}</div><button className="primary" disabled={busy||!name.trim()} onClick={()=>run(async()=>{const result=await api<{token:string}>('/admin/invitations','POST',{name,permissions:grants});setInvite(result.token);},'초대 코드를 발급했습니다.')}>초대 코드 발급</button>{invite&&<label className="security-label">한 번만 표시되는 초대 코드<input readOnly value={invite} onFocus={e=>e.target.select()}/></label>}
  <h2 className="spaced">사용자 권한</h2><p>초대 대기 중에도 권한을 변경할 수 있습니다. 권한을 고른 후 ‘권한 저장’을 누르세요.</p>{members.map(member=><div className="member" key={member.id} data-testid={'member-'+member.id}><strong>{member.name} {member.owner?'· 소유자':!member.enabled?'· 비활성화':member.registered?'· 등록 완료':'· 초대 대기'}</strong>{!member.owner&&<><div className="permission-grid">{instances.map(({config:i})=><label key={i.id}>{i.name}<select disabled={busy} aria-label={member.name+' · '+i.name+' 권한'} value={member.permissions[i.id]||''} onChange={e=>{const value=e.target.value;setMembers(old=>old.map(m=>{if(m.id!==member.id)return m;const permissions={...m.permissions};if(value)permissions[i.id]=value;else delete permissions[i.id];return {...m,permissions};}));}}><option value="">접근 불가</option><option value="VIEWER">조회만</option><option value="ADMIN">서버 관리</option></select></label>)}</div><div className="actions"><button disabled={busy} onClick={()=>run(()=>api('/admin/users/'+member.id,'PUT',{enabled:member.enabled,permissions:member.permissions}),'권한을 저장하고 기존 세션을 폐기했습니다.')}>권한 저장</button><button disabled={busy} onClick={()=>run(()=>api('/admin/users/'+member.id,'PUT',{enabled:!member.enabled,permissions:member.permissions}))}>{member.enabled?'계정 비활성화':'계정 활성화'}</button></div></>}</div>)}
  <h2 className="spaced">Mac 자동 시작</h2><label className="check-label"><input type="checkbox" aria-label="Mac 로그인 시 자동 실행" disabled={busy||!startup?.supported} checked={startup?.enabled||false} onChange={e=>{const enabled=e.target.checked;setStartup(old=>old&&({...old,enabled}));run(async()=>{try{setStartup(await api('/admin/startup','PUT',{enabled}));}catch(error){setStartup(old=>old&&({...old,enabled:!enabled}));throw error;}},enabled?'다음 Mac 로그인부터 자동 실행합니다.':'자동 실행을 해제했습니다.');}}/>Mac 로그인 시 서버 관리자 자동 실행</label><p>{startup?.supported?'변경 사항은 다음 로그인부터 적용됩니다. Minecraft 서버는 자동으로 시작하지 않습니다.':'설치 패키지의 Server Manager 앱에서 설정할 수 있습니다.'}</p>{startup&&<p className="muted">데이터 위치: {startup.dataDirectory}</p>}
- <DesktopSettings/><h2 className="spaced">외부 접속 설정</h2><label className="security-label">공개 HTTPS URL<input readOnly value={auth.session.publicOrigin} placeholder="미설정 · config/application.properties에서 지정"/></label><p>nginx 라우팅은 직접 구성하세요. 공개 URL을 변경하면 새 도메인에서 패스키를 다시 등록해야 합니다.</p>
- <h2 className="spaced">최근 감사 기록</h2><div className="audit-list">{logs.map((entry,index)=><div key={index}><time>{new Date(entry.at).toLocaleString()}</time><span>{entry.action}</span><strong>{entry.status}</strong></div>)}</div></>}
+ <DiscordSettings instances={instances}/><DesktopSettings/><h2 className="spaced">외부 접속 설정</h2><label className="security-label">공개 HTTPS URL<input readOnly value={auth.session.publicOrigin} placeholder="미설정 · config/application.properties에서 지정"/></label><p>nginx 라우팅은 직접 구성하세요. 공개 URL을 변경하면 새 도메인에서 패스키를 다시 등록해야 합니다.</p>
+ <h2 className="spaced">최근 감사 기록</h2><AuditHistory logs={logs}/></>}
  </section>;
 }

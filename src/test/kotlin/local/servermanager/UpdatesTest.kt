@@ -26,6 +26,17 @@ class UpdatesTest {
   assertTrue(SignedUpdates.compare("0.10.0","0.9.9")>0);assertTrue(SignedUpdates.compare("0.2.0","0.3.0")<0)
   assertEquals(0,SignedUpdates.compare("1.0.0","1.0.0"));assertFails { SignedUpdates.compare("../1.0","0.3.0") }
  }
+ @Test fun `beta updates sort numerically below stable and stay out of stable channel`() {
+  assertTrue(SignedUpdates.compare("0.4.0-beta.10","0.4.0-beta.2")>0)
+  assertTrue(SignedUpdates.compare("0.4.0-beta.10","0.4.0")<0)
+  assertTrue(SignedUpdates.compare("0.4.0-beta.1","0.3.0")>0)
+  assertFalse(SignedUpdates.eligible("0.4.0-beta.1",true,false))
+  assertFalse(SignedUpdates.eligible("0.4.0-beta.1",false,false))
+  assertTrue(SignedUpdates.eligible("0.4.0-beta.1",true,true))
+  assertTrue(SignedUpdates.eligible("0.4.0",false,true))
+  assertFalse(SignedUpdates.eligible("../escape",true,true))
+  assertFails { SignedUpdates.compare("0.4.0-beta.0","0.3.0") }
+ }
  @Test fun `profile selection preserves existing data and rejects unrelated directories`() {
   val profile=temp.resolve("Profiles & worlds");val selected=validateProfileDirectory(profile.toString());assertEquals(profile.toRealPath(),selected)
   profile.resolve("one").createDirectories();profile.resolve("one/instance.json").writeText("{}")

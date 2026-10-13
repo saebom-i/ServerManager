@@ -12,7 +12,12 @@ public class Bootstrap {
  static String env(String name,String fallback){return System.getenv().getOrDefault(name,fallback);}
  static void atomic(Path path,String value)throws Exception {Files.createDirectories(path.getParent());Path tmp=Files.createTempFile(path.getParent(),"write-",".tmp");try{Files.writeString(tmp,value);Files.move(tmp,path,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);}finally{Files.deleteIfExists(tmp);}}
  static String text(Path p,String fallback)throws Exception{return Files.exists(p)?Files.readString(p).trim():fallback;}
- static int compare(String a,String b){if(!a.matches("[0-9]+\\.[0-9]+\\.[0-9]+")||!b.matches("[0-9]+\\.[0-9]+\\.[0-9]+"))throw new IllegalArgumentException("Invalid version");String[] x=a.split("\\."),y=b.split("\\.");for(int i=0;i<3;i++){int c=Integer.compare(Integer.parseInt(x[i]),Integer.parseInt(y[i]));if(c!=0)return c;}return 0;}
+ static int[] versionParts(String value){
+  if(!value.matches("[0-9]{1,6}\\.[0-9]{1,6}\\.[0-9]{1,6}(-beta\\.[1-9][0-9]{0,5})?"))throw new IllegalArgumentException("Invalid version");
+  String[] split=value.split("-beta\\."),core=split[0].split("\\.");
+  return new int[]{Integer.parseInt(core[0]),Integer.parseInt(core[1]),Integer.parseInt(core[2]),split.length==2?Integer.parseInt(split[1]):Integer.MAX_VALUE};
+ }
+ static int compare(String a,String b){int[] x=versionParts(a),y=versionParts(b);for(int i=0;i<4;i++){int c=Integer.compare(x[i],y[i]);if(c!=0)return c;}return 0;}
  static Path verified(String version)throws Exception {
   if(compare(version,bundled)<=0)return resources.resolve("server-manager.jar");
   Path dir=updates.resolve(version);byte[] manifest=Files.readAllBytes(dir.resolve("update.properties"));

@@ -24,6 +24,7 @@ data class CreateRequest(val name: String, val loaderVersion: String, val port: 
 data class Event(val seq: Long, val time: String, val kind: String, val text: String)
 data class FileEntry(val name: String, val path: String, val directory: Boolean, val size: Long)
 data class MemoryCapacity(val totalMb: Long, val freeMb: Long, val reservedMb: Long, val maxHeapMb: Long, val committedHeapMb: Long, val startableHeapMb: Long)
+data class ServerSignal(val instanceId:String, val kind:String, val detail:String)
 
 class RuntimeState {
     @Volatile var process: Process? = null
@@ -47,6 +48,9 @@ class ServerManager {
     private val http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).connectTimeout(java.time.Duration.ofSeconds(20)).build()
     private val catalog by lazy { VersionCatalog(root.resolve("neoforge-versions.json")) }
     private val metrics = ProcessMetrics()
+    private val signalListeners = java.util.concurrent.CopyOnWriteArrayList<(ServerSignal)->Unit>()
+    fun onSignal(listener:(ServerSignal)->Unit):AutoCloseable { signalListeners.add(listener); return AutoCloseable { signalListeners.remove(listener) } }
+    private fun signal(id:String,kind:String,detail:String) { signalListeners.forEach { listener -> runCatching { listener(ServerSignal(id,kind,detail)) } } }
     @Scheduled(fixedDelay = 2000) fun sampleResources() {
         val pids = mutableSetOf<Long>()
         runtimes.values.forEach { r ->
@@ -186,7 +190,8 @@ class ServerManager {
             r.process=p; r.state="STARTING"; r.event("system","서버 시작 · 127.0.0.1:${i.port} · PID ${p.pid()}")
             workers.submit {
                 consume(id,p); val code=p.waitFor()
-                synchronized(r) { if(r.process===p) { r.process=null; r.state=if(code==0) "STOPPED" else "FAILED" }; r.event("system","서버 종료 (exit $code)") }
+                val requested=synchronized(r) { val stopped=r.state=="STOPPING"; if(r.process===p) { r.process=null; r.state=if(code==0) "STOPPED" else "FAILED" }; r.event("system","서버 종료 (exit $code)"); stopped }
+                signal(id,"stop",if(requested) "종료 요청 후 서버가 종료되었습니다 (exit $code)." else "예기치 않게 서버가 종료되었습니다 (exit $code).")
             }
         }
     }
@@ -199,6 +204,7 @@ class ServerManager {
                 val line=raw.replace(Regex("\u001B\\[[0-?]*[ -/]*[@-~]"), "")
                 val kind=when { line.contains("ERROR") || line.contains("Exception") -> "error"; line.contains("WARN") -> "warn"; else -> "output" }
                 synchronized(r) { if(r.state=="STARTING" && line.contains("Done (") && line.contains("For help")) r.state="RUNNING"; r.event(kind,line) }
+                if(kind=="error") signal(id,"error","서버 로그에서 오류가 감지되었습니다. 관리 웹의 콘솔에서 내용을 확인하세요.")
                 writer.appendLine(raw); writer.flush()
             } }
         }

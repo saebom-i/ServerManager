@@ -15,10 +15,15 @@ dependencies {
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation(kotlin("reflect"))
     implementation("org.tomlj:tomlj:1.1.1")
+    implementation("net.dv8tion:JDA:6.7.0") { exclude(module = "opus-java") }
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation(kotlin("test"))
     testImplementation("org.springframework.security:spring-security-test")
 }
-tasks.test { useJUnitPlatform() }
+tasks.test {
+    useJUnitPlatform()
+    // Tests must never inherit the live profile, even when launched from its working directory.
+    environment("SERVER_MANAGER_DATA", layout.buildDirectory.dir("test-profile").get().asFile.absolutePath)
+}
 
 tasks.processResources { inputs.file("VERSION"); doLast { destinationDir.resolve("app-version.txt").writeText(project.version.toString()) } }
