@@ -23,4 +23,11 @@ cat > "$plist" <<EOF
 EOF
 launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$plist"
-echo "설치 완료. '$target/pair.command'를 실행하여 웹 관리자에서 받은 등록 코드를 입력하세요. 로그인할 때 자동 대기합니다."
+echo "실행기 설치 완료. 로그인할 때 자동으로 대기합니다."
+runner_home="${SERVER_MANAGER_RUNNER_HOME:-$HOME/.servermanager-runner}"
+if [ ! -f "$runner_home/identity.json" ] && [ "${SERVER_MANAGER_SKIP_PAIRING:-0}" != 1 ] && [ -t 0 ]; then
+  echo "이제 관리 웹 주소와 패스키로 발급받은 등록 코드를 입력하여 컴퓨터를 등록합니다."
+  /bin/bash "$target/pair.command" || echo "등록을 마치지 못했습니다. '$target/pair.command'를 실행하면 다시 등록할 수 있습니다."
+else
+  echo "등록 확인 또는 재등록: '$target/pair.command'"
+fi

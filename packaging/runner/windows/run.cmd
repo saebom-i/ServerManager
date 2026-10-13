@@ -1,3 +1,5 @@
 @echo off
+chcp 65001 >nul
 set "RUNNER_PACKAGE_HOME=%~dp0"
-"%~dp0runtime\bin\java.exe" -jar "%~dp0runner-bootstrap.jar"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
+pause

@@ -13,3 +13,5 @@ select{font:inherit;color:#e4e9f1;background:#11161d;border:1px solid #323b49;bo
 .discord-rule>label:not(.check-label){display:flex;flex-direction:column;gap:8px;flex:1 1 210px;min-width:0}
 .discord-rule input:not([type=checkbox]),.discord-rule select{width:100%;min-width:0}
 .discord-settings details{margin-top:20px}.discord-settings li{margin:10px 0;line-height:1.6}
+
+.runner-assignment{margin-bottom:20px;padding:16px;border:1px solid #303743;border-radius:8px}.runner-assignment h3{margin:0;margin-right:auto}.runner-assignment>p{margin:12px 0}.runner-settings .actions{flex-wrap:wrap}.runner-settings h3{margin-top:24px}

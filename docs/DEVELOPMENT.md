@@ -35,3 +35,13 @@ Publish only validated batches as BETA prereleases. The user explicitly authoriz
 - `scripts/test-update-protocol.py` exercises the actual scheduled update check, GitHub downloads, signature/hash verification, bootstrap application and passkey login with isolated profile data. Only its initial fixture version metadata is lowered; updater and release public key are unchanged.
 - The BETA 1 real-GitHub integration run passed in about 80 seconds, including unchanged account/config files and login with the same passkey after restart.
 - Production was moved to a persistent installed-app supervisor with unchanged account/proxy/config data; local deployment details remain in LOCAL-TEST-RESULTS.md.
+
+## 0.4.0-beta.4 — runner discovery and navigation
+
+- Added a dedicated Server runners sidebar entry with per-platform downloads, passkey enrollment steps, manager URL, and an explicit empty state. Invited users retain access to enrollment.
+- Moved the execution-location selector to the main server screen, with a direct registration link. Assignment remains restricted to owner/instance ADMIN and disabled until the server is fully stopped.
+- Clicking a server from account/security or runner settings now opens that server's console. The sidebar version uses the actual session version.
+- Fresh interactive runner installations continue directly into pairing; entering the manager address opens `/#runners`. Existing background standby remains noninteractive, and unattended installation can skip pairing.
+- Added browser regression tests for empty runner discovery, invited-user enrollment/consent/assignment, running-server assignment protection, viewer separation, and global-settings navigation.
+- Validation: 47 backend tests, the existing 6 performance/log/Discord browser tests plus 3 runner/navigation tests passed. Signed bootstrap upgrade/tamper/rollback checks passed. Packaged Mac runner now confirms a visible UTF-8 enrollment prompt, no stored identity after failed enrollment, and unattended standby. Windows package contents were checked; actual Windows execution remains untested.
+- The user's game SRV hostname is `playground.enclody.sarl`, targeting external TCP 6399. The existing instance is to use port 6399. Game DNS display/configuration is a remaining UI follow-up; the web origin is distinct from the game endpoint.

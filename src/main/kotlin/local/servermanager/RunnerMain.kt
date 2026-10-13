@@ -11,6 +11,8 @@ import java.net.http.WebSocket
 import java.nio.ByteBuffer
 import java.io.ByteArrayOutputStream
 import java.io.FileOutputStream
+import java.io.PrintStream
+import java.nio.charset.StandardCharsets
 import java.net.Socket
 import java.net.InetSocketAddress
 import java.nio.file.Files
@@ -53,6 +55,10 @@ object RunnerMain {
         } finally { temp.deleteIfExists() }
     }
     fun run(args:Array<String>) {
+        // Background log files and first-run prompts must not inherit an ASCII
+        // process locale and replace Korean text with question marks.
+        System.setOut(PrintStream(System.out,true,StandardCharsets.UTF_8))
+        System.setErr(PrintStream(System.err,true,StandardCharsets.UTF_8))
         when {
             "--runner-pair" in args -> pair(args)
             "--runner-status" in args -> {
@@ -61,6 +67,7 @@ object RunnerMain {
             }
             else -> {
                 println("Server Manager 실행기 대기 시작")
+                if(!identityFile.exists()) println("이 컴퓨터는 아직 등록되지 않았습니다. 관리 웹의 ‘서버 실행기’에서 패스키로 코드를 발급하고 pair.command / pair.cmd로 등록하세요.")
                 System.getenv("SERVER_MANAGER_RUNNER_READY_FILE")?.let { Path.of(it).writeText("ready") }
                 var agent:RunnerAgent?=null
                 var currentId:String?=null
@@ -81,7 +88,9 @@ object RunnerMain {
         val uri=URI(url)
         require(uri.scheme=="https" && uri.host!=null && uri.userInfo==null && uri.query==null && uri.fragment==null && uri.path.isNullOrEmpty()) { "HTTPS 관리 주소를 입력하세요" }
         require(!identityFile.exists()) { "이미 등록된 실행기입니다. 등록을 폐기한 뒤 다시 등록하세요" }
-        val code=System.console()?.readPassword("실행기 등록 코드: ")?.concatToString()
+        val console=System.console()
+        if(console==null) { print("실행기 등록 코드: ");System.out.flush() }
+        val code=console?.readPassword("실행기 등록 코드: ")?.concatToString()
             ?: System.`in`.bufferedReader().readLine()?.trim()
             ?: error("등록 코드를 입력하세요")
         require(code.length in 30..100)

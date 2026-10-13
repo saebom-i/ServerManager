@@ -10,4 +10,9 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsI
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName 'ServerManagerRunner' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName 'ServerManagerRunner'
-Write-Host "Installed. Run '$target\pair.cmd' and enter the enrollment code shown in the web UI. The runner starts automatically at logon."
+Write-Host "Installed. The runner starts automatically at logon."
+$runnerHome = if ($env:SERVER_MANAGER_RUNNER_HOME) { $env:SERVER_MANAGER_RUNNER_HOME } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.servermanager-runner' }
+if (!(Test-Path (Join-Path $runnerHome 'identity.json')) -and $env:SERVER_MANAGER_SKIP_PAIRING -ne '1') {
+    Write-Host 'Register this computer using your management HTTPS address and the code issued after passkey verification.'
+    try { & (Join-Path $target 'pair.ps1') } catch { Write-Host "Registration incomplete. Run '$target\pair.cmd' to try again." }
+} else { Write-Host "Registration settings: '$target\pair.cmd'" }
