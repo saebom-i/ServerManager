@@ -179,7 +179,7 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
    expect(await access(runnerSandbox+'/world/level.dat').then(()=>true,()=>false)).toBe(false);
    await page.getByLabel('재현 상황 / 판정 메모').fill('Manual fixture '+verdict);
    await page.getByRole('button',{name:verdict==='FAIL'?'이번 시도 실패':'이번 시도 성공',exact:true}).click();await waitState(modId,'STOPPED');
-   await expect.poll(async()=> (await modPage()).diagnostic.phase).toBe('JUDGED');
+   await expect.poll(async()=> (await modPage()).diagnostic.phase,{timeout:30000}).toBe('JUDGED');
    await expect(async()=>{await api(modBase+'/diagnostic/next','POST');}).toPass({timeout:20000,intervals:[1000]});await waitMod();
   }
   const result=await modPage();expect(result.next.status).toBe('FOUND');expect(result.next.groups).toHaveLength(1);

@@ -5,7 +5,9 @@ cd "$(dirname "$0")/.."
 if lsof -nP -iTCP:8796 -sTCP:LISTEN >/dev/null 2>&1; then echo 'Test port 8796 is busy.' >&2; exit 1; fi
 export SM_RUNNERS_TEST_HOME="$(mktemp -d /tmp/servermanager-runners.XXXXXX)"
 export SM_RUNNERS_TEST_JAVA="$(/usr/libexec/java_home -v 21)/bin/java"
-export SM_RUNNERS_TEST_JAR="$PWD/build/libs/server-manager-$(cat VERSION).jar"
+export SM_RUNNERS_TEST_JAR="$SM_RUNNERS_TEST_HOME/candidate.jar"
+# Each running JVM must keep an immutable JAR even if a later candidate is built.
+cp "$PWD/build/libs/server-manager-$(cat VERSION).jar" "$SM_RUNNERS_TEST_JAR"
 test_keytool="${SM_RUNNERS_TEST_JAVA%/java}/keytool"
 # Disposable local certificate and password; never use the production key or config.
 "$test_keytool" -genkeypair -alias fixture -keyalg RSA -storetype PKCS12 -keystore "$SM_RUNNERS_TEST_HOME/tls.p12" -storepass fixture-only-password -keypass fixture-only-password -dname CN=localhost -ext SAN=dns:localhost -validity 2 >/dev/null 2>&1
