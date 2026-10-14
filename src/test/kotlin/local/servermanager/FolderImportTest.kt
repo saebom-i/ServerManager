@@ -28,6 +28,12 @@ class FolderImportTest {
             val complete=manager.view(instance.id)["fileTransfer"] as FolderImportProgress
             assertEquals("COMPLETE",complete.phase);assertEquals(size,complete.bytes)
             manager.fileTransferProgress(instance.id,"runner",download);assertEquals(complete,manager.view(instance.id)["fileTransfer"])
+            // A WebSocket SYNCING/failure can arrive after the separate HTTP commit.
+            manager.remoteState(instance.id,"runner","SYNCING");assertEquals("STOPPED",manager.view(instance.id)["state"])
+            manager.remoteState(instance.id,"runner","SYNC_FAILED","late failure");assertEquals("STOPPED",manager.view(instance.id)["state"])
+            manager.remoteState(instance.id,"runner","RUNNING");assertEquals("STOPPED",manager.view(instance.id)["state"])
+            manager.remoteState(instance.id,"runner","STOPPING");assertEquals("STOPPED",manager.view(instance.id)["state"])
+            assertEquals(complete,manager.view(instance.id)["fileTransfer"])
         } finally {manager.shutdown();manager.root.resolve(instance.id).toFile().deleteRecursively()}
     }
     @Test fun `import reserves stopped instance supports 20 GiB status and finishes without starting or stop alerts`() {

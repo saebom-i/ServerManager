@@ -370,7 +370,12 @@ class ServerManager {
     fun remoteState(id:String,runnerId:String,state:String,detail:String?=null) {
         val i=instance(id);if(i.runnerId!=runnerId || state !in setOf("STARTING","RUNNING","STOPPING","SYNCING","SYNC_FAILED","UNKNOWN")) return
         val r=runtime(id)
-        synchronized(r) {r.state=state;if(state=="SYNCING"){r.remotePid=null;r.resources=null;r.players=null};if(state=="RUNNING"){r.fileTransfer=r.fileTransfer?.copy(phase="COMPLETE")};if(state=="SYNC_FAILED"){r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("FAILED")).copy(phase="FAILED",message=detail?.take(500) ?: "실행기 연결과 파일 인계 상태를 확인하세요")};detail?.take(1000)?.let { r.event("system",it) } }
+        synchronized(r) {
+            // HTTP commit and WebSocket status travel independently. A delayed status
+            // must not resurrect a transfer whose lease has already been completed.
+            if(state!="UNKNOWN" && !root.resolve(id).resolve("remote-lease").exists())return
+            r.state=state;if(state=="SYNCING"){r.remotePid=null;r.resources=null;r.players=null};if(state=="RUNNING"){r.fileTransfer=r.fileTransfer?.copy(phase="COMPLETE")};if(state=="SYNC_FAILED"){r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("FAILED")).copy(phase="FAILED",message=detail?.take(500) ?: "실행기 연결과 파일 인계 상태를 확인하세요")};detail?.take(1000)?.let { r.event("system",it) }
+        }
     }
     fun remoteStartFailed(id:String,runnerId:String,detail:String?) {
         val i=instance(id);if(i.runnerId!=runnerId)return
@@ -437,9 +442,12 @@ class ServerManager {
             signal(id,"import","기존 서버 파일 가져오기를 완료했습니다")
             return
         }
-        val requested=synchronized(r) { val value=r.remoteStopRequested;r.remoteStopRequested=false;r.remoteWorkerReady=false;r.remoteCloudReady=false;r.state="STOPPED";r.players=null;r.resources=null;r.remotePid=null;r.event("system","원격 서버 파일 인계를 완료했습니다");value }
-        synchronized(r){r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("COMPLETE")).copy(phase="COMPLETE",message="서버 파일 인계를 완료했습니다")}
-        root.resolve(id).resolve("remote-lease").deleteIfExists()
+        val requested=synchronized(r) {
+            root.resolve(id).resolve("remote-lease").deleteIfExists()
+            val value=r.remoteStopRequested;r.remoteStopRequested=false;r.remoteWorkerReady=false;r.remoteCloudReady=false;r.state="STOPPED";r.players=null;r.resources=null;r.remotePid=null
+            r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("COMPLETE")).copy(phase="COMPLETE",message="서버 파일 인계를 완료했습니다")
+            r.event("system","원격 서버 파일 인계를 완료했습니다");value
+        }
         remoteController?.completed(i)
         signal(id,"stop",if(requested && r.stopReason=="IDLE")"무인 절전 요청 후 서버 종료와 데이터 인계를 완료했습니다." else if(requested) "종료 요청 후 서버 데이터 인계까지 완료되었습니다." else "서버가 종료되어 데이터 인계를 완료했습니다.")
     }
