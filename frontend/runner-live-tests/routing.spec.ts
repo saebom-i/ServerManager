@@ -78,7 +78,7 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   await access(home+'/profiles/'+ids[0]+'/transfer-receipts/'+resumedId+'.json');
   const audit=(await readFile(home+'/profiles/security/audit.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line));
   expect(audit.filter((e:any)=>e.action==='POST /api/runners/transfer/'+ids[0]+'/begin').length).toBeGreaterThanOrEqual(2);
-  expect(await readFile(home+'/profiles/'+ids[0]+'/server/resume-proof.bin')).toEqual(Buffer.alloc(64*1024*1024,37));
+  expect(createHash('sha256').update(await readFile(home+'/profiles/'+ids[0]+'/server/resume-proof.bin')).digest('hex')).toBe(createHash('sha256').update(Buffer.alloc(64*1024*1024,37)).digest('hex'));
   console.log('PASS: forced signed WSS authentication replacement during live upload preserves transfer ID, received chunks and exact bytes.');
   const imported=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);
   expect(imported.folderImport.phase).toBe('COMPLETE');expect(imported.pid).toBeNull();
