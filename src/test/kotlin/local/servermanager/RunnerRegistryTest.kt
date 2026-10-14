@@ -37,7 +37,7 @@ class RunnerRegistryTest {
             val bytes="connect:nonce".toByteArray()
             val signature=Signature.getInstance("Ed25519").apply { initSign(key.private);update(bytes) }.sign()
             assertTrue(registry.verify(runner.id,bytes,Base64.getUrlEncoder().withoutPadding().encodeToString(signature)))
-            registry.seen(runner.id,"0.4.4")
+            registry.seen(runner.id,"0.4.4");registry.updateStatus(runner.id,RunnerUpdateStatus())
             assertFails {registry.requestUpdate(admin.id,runner.id,false)}
             registry.requestUpdate(viewer.id,runner.id,false)
             assertEquals("REQUESTED",registry.views(viewer.id).single().update?.phase)

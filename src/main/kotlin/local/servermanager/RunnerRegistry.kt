@@ -25,7 +25,7 @@ import kotlin.io.path.*
 data class RunnerDevice(val id:String,val name:String,val platform:String,val registeredBy:String,val publicKey:String,
     val createdAt:String,var version:String="unknown",var enabled:Boolean=true,var allowedInstanceIds:Set<String> = emptySet())
 data class RunnerView(val id:String,val name:String,val platform:String,val registeredBy:String,val createdAt:String,
-    val version:String,val enabled:Boolean,val allowedInstanceIds:Set<String>,val online:Boolean,val lastSeen:String?,val update:RunnerUpdateStatus?=null)
+    val version:String,val enabled:Boolean,val allowedInstanceIds:Set<String>,val online:Boolean,val lastSeen:String?,val update:RunnerUpdateStatus?=null,val remoteUpdateSupported:Boolean=false)
 data class RunnerPairRequest(val code:String,val publicKey:String,val platform:String,val version:String)
 data class RunnerEnrollmentRequest(val name:String)
 private data class PendingRunner(val codeHash:String,val userId:String,val name:String,val expiresAt:Long)
@@ -98,22 +98,24 @@ class RunnerRegistry(private val manager:ServerManager,private val auth:AuthStor
     @Synchronized fun seen(id:String,version:String) {
         if(active(id)==null)return
         heartbeat[id]=System.currentTimeMillis()
-        devices[id]?.let { if(it.version!=version && version.length in 1..80) { it.version=version;persist() } }
+        devices[id]?.let { if(it.version!=version && version.length in 1..80) { it.version=version;updates.remove(id);persist() } }
     }
     @Synchronized fun disconnected(id:String) { heartbeat.remove(id) }
     @Synchronized fun online(id:String)=active(id)!=null && (heartbeat[id]?.let { System.currentTimeMillis()-it<45_000 } ?: false)
     @Synchronized fun views(userId:String):List<RunnerView> {
         val user=auth.account(userId) ?: return emptyList()
         return devices.values.filter { user.owner || it.registeredBy==userId || it.allowedInstanceIds.any { id -> user.permissions[id]=="ADMIN" } }
-            .map { RunnerView(it.id,it.name,it.platform,it.registeredBy,it.createdAt,it.version,it.enabled,it.allowedInstanceIds,online(it.id),heartbeat[it.id]?.let { ms->Instant.ofEpochMilli(ms).toString() },updates[it.id]) }
+            .map { RunnerView(it.id,it.name,it.platform,it.registeredBy,it.createdAt,it.version,it.enabled,it.allowedInstanceIds,online(it.id),heartbeat[it.id]?.let { ms->Instant.ofEpochMilli(ms).toString() },updates[it.id],remoteUpdateSupported(it.id)) }
     }
+    @Synchronized fun connected(id:String){updates.remove(id)}
+    @Synchronized fun remoteUpdateSupported(id:String)=active(id)!=null && updates[id]?.phase?.let {it!="UNSUPPORTED"}==true
     @Synchronized fun updateStatus(id:String,status:RunnerUpdateStatus){if(active(id)!=null)updates[id]=status.validated()}
     @Synchronized fun requestUpdate(userId:String,id:String,pause:Boolean) {
         val user=auth.account(userId);require(user?.enabled==true && (user.owner || devices[id]?.registeredBy==userId)) {"기기 등록자 또는 소유자만 실행기를 업데이트할 수 있습니다"}
-        val device=active(id) ?: error("폐기된 실행기입니다")
+        check(active(id)!=null) {"폐기된 실행기입니다"}
         check(online(id)) {"실행기를 온라인으로 연결하세요"}
-        check(RunnerUpdateSupport.supported(device.version)) {"이 실행기는 최초 한 번 자동 업데이트 또는 새 설치판 적용이 필요합니다 (0.4.4 이상)"}
         check(updates[id]?.phase!="UNSUPPORTED") {"서명 업데이트를 지원하는 설치판으로 실행하세요"}
+        check(remoteUpdateSupported(id)) {"이 실행기는 최초 한 번 자동 업데이트 또는 새 설치판 적용이 필요합니다 (0.4.4 이상)"}
         if(pause)check(manager.list().none {(it["config"] as Instance).runnerId==id && it["diagnosticActive"]==true}) {"모드 검사를 마친 뒤 전송 중지 업데이트를 요청하세요"}
         updates[id]=RunnerUpdateStatus("REQUESTED")
     }

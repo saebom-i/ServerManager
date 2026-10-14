@@ -2,7 +2,7 @@ import {memo,useEffect,useState} from 'react';
 import {api,ApiError} from './http';
 import {useAuth} from './Auth';
 
-type Runner={id:string;name:string;platform:string;registeredBy:string;createdAt:string;version:string;enabled:boolean;allowedInstanceIds:string[];online:boolean;lastSeen:string|null;update?:{phase:string;latest:string|null;downloadedBytes:number;totalBytes:number}|null};
+type Runner={id:string;name:string;platform:string;registeredBy:string;createdAt:string;version:string;enabled:boolean;allowedInstanceIds:string[];online:boolean;lastSeen:string|null;remoteUpdateSupported?:boolean;update?:{phase:string;latest:string|null;downloadedBytes:number;totalBytes:number}|null};
 const updateLabels:Record<string,string>={IDLE:'확인 전',REQUESTED:'요청 전달 중',CHECKING:'새 버전 확인 중',DOWNLOADING:'서명 업데이트 다운로드 중',READY:'다운로드·서명 검증 완료',WAITING:'서버 정상 종료 또는 전송 완료 대기',PAUSING:'받은 파일을 보존하고 전송 중지 중',RESTARTING:'실행기 재시작·재연결 중',CURRENT:'최신 버전',FAILED:'업데이트 실패 · 네트워크, 서명 또는 실행기 로그를 확인하세요',UNSUPPORTED:'자동 업데이트 설치판이 필요합니다'};
 function supportsUpdate(version:string){const m=/^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(version);if(!m)return false;const p=m.slice(1,4).map(Number);return p[0]>0||p[1]>4||p[1]===4&&(p[2]>4||p[2]===4&&!m[4]);}
 type Instance={config:{id:string;name:string}};
@@ -33,8 +33,8 @@ export const RunnerSettings=memo(function RunnerSettings({instances}:{instances:
  <p role="status">업데이트: {row.update?updateLabels[row.update.phase]||'상태 확인 중':supportsUpdate(row.version)?'연결 후 상태 확인':'최초 1회 실행기를 0.4.4 이상으로 업데이트하세요.'}{row.update?.latest&&` · 대상 ${row.update.latest}`}{!row.online&&' · 현재 오프라인'}</p>
  {row.update?.phase==='DOWNLOADING'&&row.update.totalBytes>0&&<><progress aria-label={`${row.name} 업데이트 다운로드`} max={row.update.totalBytes} value={row.update.downloadedBytes}/><span> {Math.floor(row.update.downloadedBytes*100/row.update.totalBytes)}%</span></>}
  {(row.registeredBy===auth.session.user?.id||auth.session.user?.owner)&&<div className="actions">
- <button disabled={busy||!row.enabled||!row.online||!supportsUpdate(row.version)||['REQUESTED','CHECKING','DOWNLOADING','PAUSING','RESTARTING','UNSUPPORTED'].includes(row.update?.phase||'')} onClick={()=>run(()=>api(`/runners/${row.id}/update`,'POST',{pauseTransfer:false}),'서명 업데이트를 요청했습니다. 게임과 전송을 마치면 적용합니다.')}>원격 업데이트 요청</button>
- <button disabled={busy||!row.enabled||!row.online||!supportsUpdate(row.version)||['REQUESTED','CHECKING','DOWNLOADING','PAUSING','RESTARTING','UNSUPPORTED'].includes(row.update?.phase||'')} onClick={()=>run(()=>api(`/runners/${row.id}/update`,'POST',{pauseTransfer:true}),'업데이트 준비 후 전송을 잠시 멈추고 재연결해 이어받습니다. 실행 중인 게임은 정상 종료까지 기다립니다.')}>전송 잠시 멈추고 업데이트</button>
+ <button disabled={busy||!row.enabled||!row.online||!row.remoteUpdateSupported||['REQUESTED','CHECKING','DOWNLOADING','PAUSING','RESTARTING','UNSUPPORTED'].includes(row.update?.phase||'')} onClick={()=>run(()=>api(`/runners/${row.id}/update`,'POST',{pauseTransfer:false}),'서명 업데이트를 요청했습니다. 게임과 전송을 마치면 적용합니다.')}>원격 업데이트 요청</button>
+ <button disabled={busy||!row.enabled||!row.online||!row.remoteUpdateSupported||['REQUESTED','PAUSING','RESTARTING','UNSUPPORTED'].includes(row.update?.phase||'')} onClick={()=>run(()=>api(`/runners/${row.id}/update`,'POST',{pauseTransfer:true}),'업데이트 준비 후 전송을 잠시 멈추고 재연결해 이어받습니다. 실행 중인 게임은 정상 종료까지 기다립니다.')}>전송 잠시 멈추고 업데이트</button>
  </div>}
  <p className="muted">기기 등록자와 소유자만 요청할 수 있습니다. 서명을 검증하며 게임을 강제로 종료하지 않습니다. 구형 실행기는 기존 자동 업데이트를 기다리거나 최신 설치판을 한 번 적용해야 원격 요청을 받을 수 있습니다.</p>
  </div>

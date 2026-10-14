@@ -93,7 +93,7 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
    expect(audit.filter((e:any)=>e.action==='PUT /api/runners/transfer/'+ids[0]+'/chunk').length).toBeLessThan(200);
    expect((await page.request.post('/api/runners/'+devices[0]+'/update',{data:{pauseTransfer:false}})).status()).toBe(403);
    await expect.poll(async()=> (await api('/runners')).find((r:any)=>r.id===devices[0])?.update?.phase,{timeout:20000}).toBe('UNSUPPORTED');
-   expect((await page.request.post('/api/runners/'+devices[0]+'/update',{data:{pauseTransfer:false},headers:{'X-CSRF-TOKEN':session.csrf}})).status()).toBe(400);
+   expect((await page.request.post('/api/runners/'+devices[0]+'/update',{data:{pauseTransfer:false},headers:{'X-CSRF-TOKEN':session.csrf}})).status()).toBe(409);
   }
   const imported=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);
   expect(imported.folderImport.phase).toBe('COMPLETE');expect(imported.pid).toBeNull();

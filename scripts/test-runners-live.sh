@@ -36,5 +36,7 @@ for attempt in $(seq 1 60); do
  sleep 1
 done
 if [ "$ready" != true ]; then echo 'Isolated manager did not start.' >&2; exit 1; fi
-(cd frontend && npx playwright test --config playwright.runners-live.config.ts)
+test_config=playwright.runners-live.config.ts
+if [ "${SM_RUNNERS_UPDATE_PROTOCOL:-0}" = 1 ]; then test_config=playwright.runner-updates-live.config.ts; fi
+(cd frontend && npx playwright test --config "$test_config")
 echo "Live runner fixture results: $SM_RUNNERS_TEST_HOME (no production profile used)"

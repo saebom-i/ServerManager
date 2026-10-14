@@ -51,6 +51,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     @PostConstruct fun attach() { manager.attachRemoteController(this) }
     override fun afterConnectionEstablished(session:WebSocketSession) {
         val id=session.attributes["runnerId"] as? String ?: run { session.close(CloseStatus.POLICY_VIOLATION);return }
+        registry.connected(id)
         sessions.put(id,session)?.takeIf { it!==session }?.let { previous ->
             sockets.values.filter {it.runnerId==id}.forEach {closeStream(it,false)}
             manager.remoteDisconnected(id)
@@ -117,7 +118,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         }
     }
     fun requestUpdate(id:String,pause:Boolean):Boolean {
-        check(RunnerUpdateSupport.supported(registry.active(id)?.version.orEmpty()))
+        check(registry.remoteUpdateSupported(id))
         return connected(id) && send(id,RunnerMessage("update-request",detail=if(pause) "PAUSE_TRANSFER" else "WHEN_IDLE"))
     }
     fun connected(id:String)=sessions[id]?.isOpen==true && registry.online(id)

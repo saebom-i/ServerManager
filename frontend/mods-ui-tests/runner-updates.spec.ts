@@ -7,9 +7,9 @@ test('runner update controls show legacy limitation, progress and registrar perm
   if(path==='/api/auth/session')body={appVersion:'0.4.4',user:{id:'friend',name:'Friend',owner:false,permissions:{}},csrf:'fixture',origin:'http://127.0.0.1:5175',publicOrigin:'',setupRequired:false};
   else if(path==='/api/instances')body=[];
   else if(path==='/api/runners')body=[
-   {id:'new',name:'내 Mac',platform:'MAC',registeredBy:'friend',version:'0.4.4',enabled:true,online:true,allowedInstanceIds:[],lastSeen:null,update:{phase,latest:phase==='DOWNLOADING'?'0.4.5':null,downloadedBytes:50,totalBytes:100}},
+   {id:'new',name:'내 Mac',platform:'MAC',registeredBy:'friend',version:'0.4.4',remoteUpdateSupported:true,enabled:true,online:true,allowedInstanceIds:[],lastSeen:null,update:{phase,latest:phase==='DOWNLOADING'?'0.4.5':null,downloadedBytes:50,totalBytes:100}},
    {id:'old',name:'구형 Mac',platform:'MAC',registeredBy:'friend',version:'0.4.0-beta.8',enabled:true,online:true,allowedInstanceIds:[],lastSeen:null},
-   {id:'other',name:'다른 사람 PC',platform:'WINDOWS',registeredBy:'someone',version:'0.4.4',enabled:true,online:true,allowedInstanceIds:[],lastSeen:null}];
+   {id:'other',name:'다른 사람 PC',platform:'WINDOWS',registeredBy:'someone',version:'0.4.4',remoteUpdateSupported:true,enabled:true,online:true,allowedInstanceIds:[],lastSeen:null}];
   else if(path==='/api/runners/new/update'){requests.push(route.request().postDataJSON());phase='DOWNLOADING';}
   await route.fulfill({json:body});
  });

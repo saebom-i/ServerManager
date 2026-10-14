@@ -40,12 +40,13 @@ class RunnerGatewayTest {
         val session=mock(WebSocketSession::class.java);`when`(session.attributes).thenReturn(mutableMapOf<String,Any>("runnerId" to "runner"));`when`(session.isOpen).thenReturn(true)
         val sent=mutableListOf<WebSocketMessage<*>>();doAnswer {sent.add(it.arguments[0] as WebSocketMessage<*>);null}.`when`(session).sendMessage(any())
         val gateway=RunnerGateway(registry,manager);gateway.afterConnectionEstablished(session);sent.clear()
+        `when`(registry.remoteUpdateSupported("runner")).thenReturn(true)
         assertTrue(gateway.requestUpdate("runner",true))
         val command=jacksonObjectMapper().readValue<RunnerMessage>((sent.single() as TextMessage).payload)
         assertEquals("update-request",command.type);assertEquals("PAUSE_TRANSFER",command.detail)
         gateway.handleMessage(session,TextMessage(jacksonObjectMapper().writeValueAsString(RunnerMessage("update-status",detail=jacksonObjectMapper().writeValueAsString(RunnerUpdateStatus("DOWNLOADING","0.4.5",5,10))))))
         verify(registry).updateStatus("runner",RunnerUpdateStatus("DOWNLOADING","0.4.5",5,10))
-        `when`(registry.active("runner")).thenReturn(device.copy(version="0.4.3"));assertFails {gateway.requestUpdate("runner",false)}
+        `when`(registry.active("runner")).thenReturn(device.copy(version="0.4.3"));`when`(registry.remoteUpdateSupported("runner")).thenReturn(false);assertFails {gateway.requestUpdate("runner",false)}
     }
     @Test fun `diagnostics reject old runners before sending start and carry isolated context on new runners`() {
         val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java)
