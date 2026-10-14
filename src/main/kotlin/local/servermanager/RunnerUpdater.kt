@@ -25,6 +25,7 @@ class RunnerUpdater(private val home:Path,private val current:String,
     private val updates=home.resolve("updates")
     @Volatile private var state=RunnerUpdateStatus()
     fun status()=state
+    fun busy()=checking.get()
     fun phase(value:String){publish(state.copy(phase=value,latest=pendingVersion() ?: state.latest))}
     private fun publish(next:RunnerUpdateStatus){state=next.validated();changed(state)}
     private fun pendingVersion():String?=runCatching {updates.resolve("pending.txt").takeIf {it.exists()}?.readText()?.trim()?.takeIf {SignedUpdates.compare(it,current)>0}}.getOrNull()
@@ -62,11 +63,15 @@ class RunnerUpdater(private val home:Path,private val current:String,
                     Files.move(temp,jar,ATOMIC_MOVE,REPLACE_EXISTING)
                 } finally { temp.deleteIfExists() }
             }
-            folder.resolve("update.properties").writeBytes(manifest)
-            folder.resolve("update.sig").writeBytes(signature)
+            atomicBytes(folder.resolve("update.properties"),manifest)
+            atomicBytes(folder.resolve("update.sig"),signature)
             atomicText(updates.resolve("pending.txt"),version)
             publish(RunnerUpdateStatus("READY",version))
         } catch(e:Exception){publish(state.copy(phase="FAILED"));throw e} finally { checking.set(false) }
+    }
+    private fun atomicBytes(path:Path,bytes:ByteArray) {
+        val temp=Files.createTempFile(path.parent,".metadata-",".part")
+        try {temp.writeBytes(bytes);Files.move(temp,path,ATOMIC_MOVE,REPLACE_EXISTING)}finally{temp.deleteIfExists()}
     }
     private fun response(uri:URI):HttpResponse<java.io.InputStream> {
         var next=uri

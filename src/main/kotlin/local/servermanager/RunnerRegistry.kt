@@ -158,7 +158,8 @@ class RunnerApi(private val registry:RunnerRegistry,private val auth:AuthStore,p
     @GetMapping fun list(authentication:Authentication)=registry.views(authentication.name)
     @PostMapping("/{id}/update") fun update(@PathVariable id:String,@RequestBody request:RunnerUpdateRequest,authentication:Authentication,req:HttpServletRequest) {
         fresh(req);registry.requestUpdate(authentication.name,id,request.pauseTransfer)
-        check(gateway.requestUpdate(id,request.pauseTransfer)) {"실행기 연결이 끊겼습니다. 다시 요청하세요"}
+        try {check(gateway.requestUpdate(id,request.pauseTransfer)) {"실행기 연결이 끊겼습니다. 다시 요청하세요"}}
+        catch(e:Exception){registry.updateStatus(id,RunnerUpdateStatus("FAILED"));throw e}
         audit.append(authentication.name,"runner signed update requested $id",200,"web")
     }
     @PostMapping("/enroll") fun enroll(@RequestBody request:RunnerEnrollmentRequest,authentication:Authentication,req:HttpServletRequest):Map<String,Any> {

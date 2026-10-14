@@ -10,7 +10,7 @@ const exec=promisify(execFile);
 
 test('real web request pauses an upload, signed GitHub update restarts supervisor and preserves enrollment and resume',async({page,context})=>{
  const home=process.env.SM_RUNNERS_TEST_HOME!,java=process.env.SM_RUNNERS_TEST_JAVA!,jar=process.env.SM_RUNNERS_TEST_JAR!;expect(home.startsWith('/tmp/servermanager-runners.')).toBe(true);
- const target=process.env.SM_RUNNERS_UPDATE_TARGET||'0.4.3',fake='0.3.99-beta.1';
+ const target=process.env.SM_RUNNERS_UPDATE_TARGET||'0.4.3',fake='0.4.3-beta.999';
  const cdp=await context.newCDPSession(page);await cdp.send('WebAuthn.enable');await cdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}});
  await page.goto('/');await page.getByLabel('등록 코드').fill((await readFile(home+'/profiles/security/setup-code.txt','utf8')).trim());await page.getByRole('button',{name:'패스키 등록',exact:true}).click();await expect(page.getByRole('button',{name:'서버 실행기',exact:true})).toBeVisible();
  const session=await (await page.request.get('/api/auth/session')).json();

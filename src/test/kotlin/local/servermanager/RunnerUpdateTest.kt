@@ -53,6 +53,7 @@ class RunnerUpdateTest {
         folder.resolve("dirty").writeText(dirty);folder.resolve("folder-import.pending").writeText("fixture pending");folder.resolve("received").writeText("already received")
         val agent=RunnerAgent(temp,RunnerIdentity("https://localhost","fixture","fixture","unused","MAC"),service)
         try {
+            `when`(service.busy()).thenReturn(true);assertFalse(agent.restartForUpdate());`when`(service.busy()).thenReturn(false)
             assertFalse(agent.restartForUpdate())
             agent.requestUpdate(true);verify(service,timeout(3000)).phase("PAUSING")
             assertFalse(agent.restartForUpdate());assertTrue(process.isAlive)

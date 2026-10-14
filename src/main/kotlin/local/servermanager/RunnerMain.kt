@@ -215,10 +215,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
             service.phase(if(updatePauseRequested && processes.values.none {it.isAlive})"PAUSING" else "WAITING")
         } else if(service.status().phase in setOf("CURRENT","FAILED")){pauseAfterDownload=false}
     }
+    private fun reserveUpload(id:String)=synchronized(lifecycle){!updatePauseRequested && uploading.add(id)}
     private fun updateCheckpoint(){if(updatePauseRequested)throw RetryTransfer("서명된 실행기 업데이트를 위해 전송을 잠시 중지했습니다. 재연결 후 이어받습니다")}
     fun restartForUpdate():Boolean=synchronized(lifecycle) {
         val service=updater ?: return false
-        if(!service.pending())return false
+        if(service.busy() || !service.pending())return false
         val root=home.resolve("instances")
         val dirs=if(root.exists())root.listDirectoryEntries().filter {it.isDirectory()} else emptyList()
         if(processes.values.any {it.isAlive} || preparing.isNotEmpty() || dirs.any {orphanAlive(it.name)}){service.phase("WAITING");return false}
@@ -330,9 +331,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
     private fun encode(value:String)=URLEncoder.encode(value,Charsets.UTF_8)
     private fun beginStart(id:String,rawConfig:String)=synchronized(operationLocks.computeIfAbsent(id){Any()}) {
         var spawned=false
-        preparing.add(id)
         try {
-            updateCheckpoint()
+            synchronized(lifecycle){updateCheckpoint();preparing.add(id)}
             check(processes[id]?.isAlive!=true) { "이미 실행 중입니다" }
             check(!dirty(id).exists()) { "이전 실행의 데이터 인계가 완료되지 않았습니다" }
             check(!instanceRoot(id).resolve("folder-import.pending").exists() && id !in uploading) { "기존 폴더 가져오기가 끝난 뒤 시작하세요" }
@@ -368,7 +368,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
         }}
     }
     private fun importFolder(id:String,rawConfig:String,request:String) {
-        if(updatePauseRequested || !uploading.add(id))return
+        if(!reserveUpload(id))return
         try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {
             require(UUID.fromString(request).toString()==request)
             check(processes[id]?.isAlive!=true && !dirty(id).exists() && !orphanAlive(id)) { "서버를 정상 종료하고 기존 파일 인계를 먼저 완료하세요" }
@@ -511,7 +511,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
     }
     }
     private fun uploadStopped(id:String) {
-        if(updatePauseRequested || !dirty(id).exists() || processes[id]?.isAlive==true || orphanAlive(id) || sessionToken==null || !uploading.add(id))return
+        if(!dirty(id).exists() || processes[id]?.isAlive==true || orphanAlive(id) || sessionToken==null || !reserveUpload(id))return
         try {
             val receipt=instanceRoot(id).resolve("upload.pending")
             if(receipt.exists()) {
@@ -552,7 +552,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
             }
             progress(FolderImportProgress("SCANNING",message="원래 폴더의 파일·해시를 검사하고 있습니다"),true)
             val snapshot=if(request!=null)FileInventory.snapshot(serverDir(id)) else null
-            val (files,dirs)=FileInventory.collect(serverDir(id)) {count,bytes->progress(FolderImportProgress("SCANNING",count,bytes))}
+            val (files,dirs)=FileInventory.collect(serverDir(id)) {count,bytes->updateCheckpoint();progress(FolderImportProgress("SCANNING",count,bytes))}
             val manifest=RunnerFileManifest(files,dirs)
             val capability=http("GET","/api/runners/transfer/$id/transfer-state?transferId=00000000-0000-0000-0000-000000000000")
             val resumable=if(capability.statusCode()==404)false else {transferResponse(capability,"이어받기 지원 확인 대기");true}
