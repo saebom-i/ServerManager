@@ -49,11 +49,13 @@ class LogFilterStore(private val root:Path) {
         require(c.presets.map {it.id}.distinct().size==c.presets.size)
         c.presets.forEach {require(it.id.matches(Regex("[A-Za-z0-9_-]{1,64}"))&&it.name.isNotBlank()&&it.name.length<=60&&it.name.none(Char::isISOControl));rules(it.rules)}
         require(c.activeId==null||c.presets.any {it.id==c.activeId})
-        val next=LogFilterView(c,before.revision+1);val p=file(user,instance);safe(p)
+        val next=LogFilterView(c,before.revision+1);val bytes=mapper.writeValueAsBytes(next)
+        require(bytes.size<=256*1024){"저장할 필터의 전체 용량이 큽니다. 프리셋이나 항목을 줄여주세요"}
+        val p=file(user,instance);safe(p)
         p.parent.createDirectories();root.createDirectories()
         Files.setPosixFilePermissions(root,PosixFilePermissions.fromString("rwx------"));Files.setPosixFilePermissions(p.parent,PosixFilePermissions.fromString("rwx------"))
         val tmp=Files.createTempFile(p.parent,".filters-",".tmp",PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
-        try {tmp.writeBytes(mapper.writeValueAsBytes(next));Files.move(tmp,p,java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING)} finally {tmp.deleteIfExists()}
+        try {tmp.writeBytes(bytes);Files.move(tmp,p,java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING)} finally {tmp.deleteIfExists()}
         return next
     }
 }

@@ -22,6 +22,10 @@ class LogFiltersTest {
         assertFailsWith<IllegalArgumentException>{store.save("user-a","server-a",LogFilterView(config.copy(rules=rules.copy(keywords=List(41){"k$it"})),1))}
         assertFailsWith<IllegalArgumentException>{store.save("user-a","server-a",LogFilterView(config.copy(rules=rules.copy(mods=listOf("a\nb"))),1))}
         assertFailsWith<IllegalArgumentException>{store.save("user-a","../server-a",LogFilterView(config,0))}
+        val large=LogFilterRules(List(40){"긴".repeat(110)+it},List(40){"모".repeat(110)+it},true)
+        val oversized=LogFilterConfig(rules=large,presets=List(20){LogFilterPreset("large$it","설정$it",large)})
+        assertFailsWith<IllegalArgumentException>{store.save("user-a","server-a",LogFilterView(oversized,1))}
+        assertEquals(config,store.get("user-a","server-a").config)
         val file=java.nio.file.Files.walk(temp.resolve("filters")).use {s->s.filter {it.name=="server-a.json"}.findFirst().get()}
         assertEquals("rw-------",java.nio.file.attribute.PosixFilePermissions.toString(java.nio.file.Files.getPosixFilePermissions(file)))
         file.deleteExisting();java.nio.file.Files.createSymbolicLink(file,temp.resolve("outside.json"))
