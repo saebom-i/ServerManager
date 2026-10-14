@@ -90,6 +90,12 @@ class FolderImportTest {
             manager.importRemoteFolder(instance.id)
             assertFailsWith<IllegalStateException>{manager.folderImportFailed(instance.id,"runner","wrong","old failure")}
             assertEquals("IMPORTING",manager.view(instance.id)["state"])
+            manager.folderImportProgress(instance.id,"runner",ticket,FolderImportProgress("UPLOADING",7116,102400,8000,204800))
+            manager.folderImportFailed(instance.id,"runner",ticket,"파일 청크 업로드 실패: HTTP 403")
+            assertEquals("PENDING",manager.folderImportState(instance.id,"runner",ticket))
+            assertTrue(manager.root.resolve(instance.id).resolve("remote-lease").exists())
+            val retry=manager.view(instance.id)["folderImport"] as FolderImportProgress
+            assertEquals("RETRYING",retry.phase);assertEquals(7116,retry.files);assertEquals(102400L,retry.bytes)
             manager.folderImportFailed(instance.id,"runner",ticket,"source changed")
             assertEquals("FAILED",manager.view(instance.id)["state"]);assertEquals("keep",file.readText())
             assertFalse(manager.root.resolve(instance.id).resolve("remote-lease").exists())

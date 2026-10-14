@@ -352,6 +352,13 @@ class ServerManager {
         val r=runtime(id)
         synchronized(r) {
             checkFolderImport(id,runner,request)
+            // Legacy runners report transient HTTP failures as import-failed.
+            // Keep their authenticated ticket so their recovery loop can reuse
+            // the staged payload instead of starting a new destructive import.
+            if(Regex("HTTP\\s+(?:401|403|408|429|5\\d{2})(?!\\d)").containsMatchIn(detail.orEmpty())) {
+                r.state="IMPORTING";r.folderImport=(r.folderImport ?: FolderImportProgress("RETRYING")).copy(phase="RETRYING",message="연결 복구 후 받은 파일부터 이어받습니다 · ${detail.orEmpty().take(300)}")
+                return
+            }
             folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists()
             r.state="FAILED";r.folderImport=FolderImportProgress("FAILED",message=detail.orEmpty().take(500));r.event("error","기존 폴더 가져오기 실패: ${detail.orEmpty().take(500)}")
         }

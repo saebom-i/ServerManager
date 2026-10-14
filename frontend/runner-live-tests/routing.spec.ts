@@ -80,12 +80,12 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   await expect.poll(async()=>{try{const names=await readdir(cacheRoot);resumedId=names.find(n=>/^[a-f0-9-]{36}$/.test(n))||'';if(!resumedId)return false;const files=await readdir(cacheRoot+'/'+resumedId,{recursive:true});for(const file of files){const info=await stat(cacheRoot+'/'+resumedId+'/'+file);if(info.isFile()&&info.size>=4*1024*1024)return true;}return false;}catch{return false;}},{timeout:120000,intervals:[10,20,30]}).toBe(true);
   // Suspend only the disposable runner before any Minecraft JVM exists so that
   // authentication is replaced while its upload still has pending requests.
-  if(!legacy){runners[0].kill('SIGSTOP');
-   try {await rotateFixtureRunnerSession(runnerHomes[0]);} finally {runners[0].kill('SIGCONT');}}
+  runners[0].kill('SIGSTOP');
+  try {await rotateFixtureRunnerSession(runnerHomes[0]);} finally {runners[0].kill('SIGCONT');}
   await waitState(ids[0],'STOPPED');
   await access(home+'/profiles/'+ids[0]+'/transfer-receipts/'+resumedId+'.json');
   const audit=(await readFile(home+'/profiles/security/audit.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line));
-  expect(audit.filter((e:any)=>e.action==='POST /api/runners/transfer/'+ids[0]+'/begin').length).toBeGreaterThanOrEqual(legacy?1:2);
+  expect(audit.filter((e:any)=>e.action==='POST /api/runners/transfer/'+ids[0]+'/begin').length).toBeGreaterThanOrEqual(2);
   expect(createHash('sha256').update(await readFile(home+'/profiles/'+ids[0]+'/server/resume-proof.bin')).digest('hex')).toBe(createHash('sha256').update(Buffer.alloc(64*1024*1024,37)).digest('hex'));
   console.log(legacy?'PASS: real beta.8 runners import existing folder through new manager without unknown-field JSON errors.':'PASS: forced signed WSS authentication replacement during live upload preserves transfer ID, received chunks and exact bytes.');
   const imported=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);
