@@ -34,6 +34,7 @@ class RunnerTransfer(private val manager:ServerManager,private val registry:Runn
         else manager.fileTransferProgress(transfer.instanceId,transfer.runnerId,value)
     }
     fun inventory(id:String):RunnerFileManifest=locked(id) {
+        manager.checkTransferReady(id)
         val (files,dirs)=FileInventory.collect(manager.serverDir(id))
         RunnerFileManifest(files,dirs)
     }
@@ -41,6 +42,7 @@ class RunnerTransfer(private val manager:ServerManager,private val registry:Runn
         require(manager.instance(instanceId).runnerId==runnerId && registry.active(runnerId)?.allowedInstanceIds?.contains(instanceId)==true)
         if(importRequest!=null)manager.checkFolderImport(instanceId,runnerId,importRequest)
         else check(!manager.root.resolve(instanceId).resolve("folder-import.pending").exists()) { "기존 폴더 가져오기 작업이 진행 중입니다" }
+        manager.checkTransferReady(instanceId)
         DeltaTransfer.validate(manifest,manager.serverDir(instanceId))
         DeltaTransfer.recover(manager.serverDir(instanceId),history(instanceId))
         if(importRequest!=null)manager.folderImportProgress(instanceId,runnerId,importRequest,FolderImportProgress("SCANNING",message="관리 서버의 기존 파일과 비교하고 있습니다"))

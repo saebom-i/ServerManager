@@ -38,6 +38,7 @@ interface RemoteController {
 
 class RuntimeState {
     @Volatile var process: Process? = null
+    @Volatile var recoveringFiles=false
     var state = "NEW"
     var seq = 0L
     val events = ArrayDeque<Event>()
@@ -125,9 +126,19 @@ class ServerManager {
         Files.list(root).use { dirs -> dirs.filter { it.resolve("instance.json").exists() }.forEach {
             val instance: Instance = mapper.readValue(it.resolve("instance.json").readText())
             serverDir(instance.id).createDirectories()
-            DeltaTransfer.recover(serverDir(instance.id),root.resolve(instance.id).resolve("runner-backups"))
             instances[instance.id] = instance
-            runtimes[instance.id] = RuntimeState().apply { state = when { root.resolve(instance.id).resolve("remote-lease").exists() -> "UNKNOWN"; root.resolve(instance.id).resolve("import.pending").exists() -> "IMPORT_FAILED"; root.resolve(instance.id).resolve("installed.ok").exists() -> "STOPPED"; else -> "NEW" } }
+            val r=RuntimeState()
+            fun initialState()=when {root.resolve(instance.id).resolve("remote-lease").exists()->"UNKNOWN";root.resolve(instance.id).resolve("import.pending").exists()->"IMPORT_FAILED";root.resolve(instance.id).resolve("installed.ok").exists()->"STOPPED";else->"NEW"}
+            val history=root.resolve(instance.id).resolve("runner-backups")
+            val recover=history.exists()
+            r.recoveringFiles=recover;r.state=if(recover)"SYNCING" else initialState()
+            runtimes[instance.id]=r
+            if(recover)workers.submit {
+                try {
+                    DeltaTransfer.recover(serverDir(instance.id),history)
+                    synchronized(r) {r.state=initialState();r.recoveringFiles=false;r.event("system","파일 전송 복구 검사를 완료했습니다")}
+                } catch(e:Exception) {synchronized(r) {r.state="SYNC_FAILED";r.recoveringFiles=false;r.event("error","파일 전송 복구 실패: ${e.message?.take(300)}")}}
+            }
         } }
     }
     fun instance(id: String): Instance = instances[id] ?: throw IllegalArgumentException("인스턴스를 찾을 수 없습니다")
@@ -252,7 +263,8 @@ class ServerManager {
             } catch(e: Exception) { synchronized(r) { r.process=null; r.state="FAILED"; r.event("error", e.message ?: "설치 실패") } }
         }
     }
-    private fun checkIdle(r: RuntimeState) { check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","RUNNING","STOPPING","IMPORTING","TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN")) { "서버가 실행 중이거나 작업 중입니다" } }
+    fun checkTransferReady(id:String) {check(!runtime(id).recoveringFiles) {"중단된 파일 반영을 복구하고 있습니다. 완료 후 다시 시도하세요"}}
+    private fun checkIdle(r: RuntimeState) { check(!r.recoveringFiles) {"파일 복구가 끝난 뒤 다시 시도하세요"};check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","RUNNING","STOPPING","IMPORTING","TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN")) { "서버가 실행 중이거나 작업 중입니다" } }
     private fun folderImportMarker(id:String)=root.resolve(id).resolve("folder-import.pending")
     @Synchronized fun importRemoteFolder(id:String) {
         val i=instance(id);val r=runtime(id)
@@ -268,7 +280,7 @@ class ServerManager {
     }
     fun checkFolderImport(id:String,runner:String,request:String) {
         val r=runtime(id)
-        synchronized(r) {check(instance(id).runnerId==runner && r.state in setOf("IMPORTING","UNKNOWN") && r.remotePid==null && folderImportMarker(id).takeIf {it.exists()}?.readText()==request) { "기존 폴더 가져오기 요청이 만료됐거나 실행기가 변경됐습니다" }}
+        synchronized(r) {check(!r.recoveringFiles && instance(id).runnerId==runner && r.state in setOf("IMPORTING","UNKNOWN") && r.remotePid==null && folderImportMarker(id).takeIf {it.exists()}?.readText()==request) { "기존 폴더 가져오기 요청이 만료됐거나 실행기가 변경됐습니다" }}
     }
     fun folderImportState(id:String,runner:String,request:String):String {
         require(instance(id).runnerId==runner)
@@ -391,6 +403,7 @@ class ServerManager {
         val i=instance(id);if(i.runnerId!=runnerId || state !in setOf("STARTING","RUNNING","STOPPING","SYNCING","SYNC_FAILED","UNKNOWN")) return
         val r=runtime(id)
         synchronized(r) {
+            if(r.recoveringFiles)return
             // HTTP commit and WebSocket status travel independently. A delayed status
             // must not resurrect a transfer whose lease has already been completed.
             if(state!="UNKNOWN" && !root.resolve(id).resolve("remote-lease").exists())return
@@ -527,7 +540,7 @@ class ServerManager {
         }
     }
     fun path(id: String, relative: String): Path {
-        instance(id); val base=serverDir(id).toRealPath(); val p=base.resolve(relative).normalize()
+        instance(id);checkTransferReady(id);val base=serverDir(id).toRealPath(); val p=base.resolve(relative).normalize()
         require(p.startsWith(base)) { "인스턴스 외부 경로입니다" }
         var ancestor: Path?=p
         while(ancestor!=null && ancestor.startsWith(base)) { require(!Files.isSymbolicLink(ancestor)) { "심볼릭 링크는 지원하지 않습니다" }; ancestor=ancestor.parent }

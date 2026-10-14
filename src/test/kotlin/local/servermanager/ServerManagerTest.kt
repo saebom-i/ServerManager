@@ -68,7 +68,26 @@ class ServerManagerTest {
         val after=before.copy(files=before.files+("level.dat" to CloudFile(FileInventory.digest(stage.resolve("level.dat")),3)))
         assertFailsWith<Error> {DeltaTransfer.apply(base,stage,before,after,manager.root.resolve(id).resolve("runner-backups"),afterStep={if(it=="install:level.dat")throw Error("simulated process exit")})}
         val restarted=ServerManager()
-        try {assertEquals("original",restarted.text(id,"level.dat")["content"])} finally {restarted.shutdown()}
+        try {
+            val deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while(restarted.runtime(id).recoveringFiles && System.nanoTime()<deadline)Thread.sleep(10)
+            assertFalse(restarted.runtime(id).recoveringFiles)
+            assertEquals("original",restarted.text(id,"level.dat")["content"])
+        } finally {restarted.shutdown()}
+    }
+    @Test fun `recovery excludes starts file access and late remote running frames`() {
+        val id=instance();manager.assignRunner(id,"runner")
+        val r=manager.runtime(id);r.state="SYNCING";r.recoveringFiles=true
+        val lease=manager.root.resolve(id).resolve("remote-lease").also {it.writeText("runner")}
+        try {
+            manager.remoteState(id,"runner","RUNNING")
+            assertEquals("SYNCING",r.state)
+            assertFailsWith<IllegalStateException>{manager.start(id)}
+            assertFailsWith<IllegalStateException>{manager.files(id,"")}
+            assertFailsWith<IllegalStateException>{manager.write(id,"level.dat","blocked".toByteArray())}
+            assertFailsWith<IllegalStateException>{manager.checkTransferReady(id)}
+            assertTrue(lease.exists());assertFalse(manager.serverDir(id).resolve("level.dat").exists())
+        } finally {r.recoveringFiles=false;r.state="STOPPED";lease.deleteIfExists()}
     }
     @Test fun `memory validation follows actual host capacity`() {
         val cap=manager.capacity()
