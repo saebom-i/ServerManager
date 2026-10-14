@@ -37,6 +37,12 @@ class RunnerRegistryTest {
             val bytes="connect:nonce".toByteArray()
             val signature=Signature.getInstance("Ed25519").apply { initSign(key.private);update(bytes) }.sign()
             assertTrue(registry.verify(runner.id,bytes,Base64.getUrlEncoder().withoutPadding().encodeToString(signature)))
+            registry.seen(runner.id,"0.4.4")
+            assertFails {registry.requestUpdate(admin.id,runner.id,false)}
+            registry.requestUpdate(viewer.id,runner.id,false)
+            assertEquals("REQUESTED",registry.views(viewer.id).single().update?.phase)
+            registry.disconnected(runner.id);assertFails {registry.requestUpdate(viewer.id,runner.id,false)}
+            registry.seen(runner.id,"0.4.0-beta.8");assertFails {registry.requestUpdate(viewer.id,runner.id,false)}
             registry.allow(viewer.id,runner.id,"a",false)
             assertFalse(registry.canAssign(admin.id,"a",runner.id))
             registry.revoke(viewer.id,runner.id)

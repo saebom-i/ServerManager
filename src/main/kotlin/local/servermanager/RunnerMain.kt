@@ -112,11 +112,18 @@ object RunnerMain {
     }
 }
 
-class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):WebSocket.Listener {
+class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,updateService:RunnerUpdater?=null):WebSocket.Listener {
     private val mapper=jacksonObjectMapper()
     private val client=HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).connectTimeout(Duration.ofSeconds(15)).build()
     private val workers=Executors.newCachedThreadPool()
-    private val updater=if(System.getenv("RUNNER_PACKAGE_HOME")!=null) RunnerUpdater(home,version()) else null
+    @Volatile private var updatePauseRequested=false
+    @Volatile private var pauseAfterDownload=false
+    private val preparing=ConcurrentHashMap.newKeySet<String>()
+    private val lifecycle=Any()
+    private val updater=updateService ?: if(System.getenv("RUNNER_PACKAGE_HOME")!=null) RunnerUpdater(home,version()) {state->
+        if(state.phase=="READY" && pauseAfterDownload)updatePauseRequested=true
+        send(RunnerMessage("update-status",detail=mapper.writeValueAsString(state)))
+    } else null
     @Volatile private var lastUpdateCheck=0L
     private val connection=AtomicReference<WebSocket?>()
     @Volatile private var closed=CountDownLatch(1)
@@ -172,10 +179,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             val updateClient=updater
             if(updateClient!=null && now-lastUpdateCheck>6*60*60*1000L) {
                 lastUpdateCheck=now
-                workers.submit { runCatching { updateClient.check() }.onFailure { System.err.println("실행기 업데이트 확인 실패: ${it.javaClass.simpleName}") } }
+                workers.submit { checkRunnerUpdate() }
             }
             if(restartForUpdate()) kotlin.system.exitProcess(75)
             send(RunnerMessage("heartbeat",version=version()))
+            reportUpdate()
             reportFolders()
             processes.forEach { (id,process) -> report(id,process) }
             if(sessionToken!=null) home.resolve("instances").takeIf { it.exists() }?.let { root -> Files.list(root).use { dirs -> dirs.filter { it.isDirectory() && it.resolve("dirty").exists() && processes[it.fileName.toString()]?.isAlive!=true }.forEach { dir ->
@@ -194,15 +202,35 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         sessionToken=null;connection.set(null)
         gameStreams.values.forEach { runCatching { it.close() } };gameStreams.clear()
     }
-    fun restartForUpdate():Boolean {
-        if(updater?.pending()!=true || processes.values.any { it.isAlive } || uploading.isNotEmpty())return false
+    private fun reportUpdate(){send(RunnerMessage("update-status",detail=mapper.writeValueAsString(updater?.status() ?: RunnerUpdateStatus("UNSUPPORTED"))))}
+    fun requestUpdate(pause:Boolean) {
+        if(pause)pauseAfterDownload=true
+        workers.submit {checkRunnerUpdate()}
+    }
+    private fun checkRunnerUpdate() {
+        val service=updater ?: run {reportUpdate();return}
+        runCatching {service.check()}.onFailure {System.err.println("실행기 업데이트 확인 실패: ${it.javaClass.simpleName}")}
+        if(service.pending()) {
+            if(pauseAfterDownload)updatePauseRequested=true
+            service.phase(if(updatePauseRequested && processes.values.none {it.isAlive})"PAUSING" else "WAITING")
+        } else if(service.status().phase in setOf("CURRENT","FAILED")){pauseAfterDownload=false}
+    }
+    private fun updateCheckpoint(){if(updatePauseRequested)throw RetryTransfer("서명된 실행기 업데이트를 위해 전송을 잠시 중지했습니다. 재연결 후 이어받습니다")}
+    fun restartForUpdate():Boolean=synchronized(lifecycle) {
+        val service=updater ?: return false
+        if(!service.pending())return false
         val root=home.resolve("instances")
-        return !root.exists() || Files.list(root).use { paths -> paths.noneMatch { it.resolve("dirty").exists() || it.resolve("folder-import.pending").exists() } }
+        val dirs=if(root.exists())root.listDirectoryEntries().filter {it.isDirectory()} else emptyList()
+        if(processes.values.any {it.isAlive} || preparing.isNotEmpty() || dirs.any {orphanAlive(it.name)}){service.phase("WAITING");return false}
+        if(uploading.isNotEmpty())return false
+        if(!updatePauseRequested && dirs.any {it.resolve("dirty").exists() || it.resolve("folder-import.pending").exists()}){service.phase("WAITING");return false}
+        updatePauseRequested=true;service.phase("RESTARTING");true
     }
     fun shutdownGracefully() {
         processes.keys.forEach { stop(it) }
         processes.values.forEach { runCatching { it.waitFor() } }
-        home.resolve("instances").takeIf { it.exists() }?.let { root -> Files.list(root).use { paths -> paths.filter { it.resolve("dirty").exists() }.forEach { dir -> uploadStopped(dir.fileName.toString()) } } }
+        if(!updatePauseRequested)home.resolve("instances").takeIf { it.exists() }?.let { root -> Files.list(root).use { paths -> paths.filter { it.resolve("dirty").exists() }.forEach { dir -> uploadStopped(dir.fileName.toString()) } } }
+        workers.shutdown()
     }
     override fun onOpen(webSocket:WebSocket) { webSocket.request(1) }
     override fun onText(webSocket:WebSocket,data:CharSequence,last:Boolean):CompletionStage<*> {
@@ -212,7 +240,10 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                 val raw=textBuffer.toString();textBuffer.setLength(0)
                 runCatching { mapper.readValue<RunnerMessage>(raw) }.getOrNull()?.let { message ->
                     when(message.type) {
-                        "session" -> { sessionToken=message.token;recoverStates() }
+                        "session" -> { sessionToken=message.token;reportUpdate();recoverStates() }
+                        "update-request" -> if(message.detail in setOf("WHEN_IDLE","PAUSE_TRANSFER")) {
+                            requestUpdate(message.detail=="PAUSE_TRANSFER")
+                        }
                         "start" -> if(message.instanceId!=null && message.detail!=null) workers.submit { beginStart(message.instanceId,message.detail) }
                         "import-folder" -> if(message.instanceId!=null && message.detail!=null && message.token!=null)workers.submit {importFolder(message.instanceId,message.detail,message.token)}
                         "stop" -> message.instanceId?.let { stop(it) }
@@ -290,10 +321,18 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         if(contentType!=null) builder.header("Content-Type",contentType)
         return try {client.send(builder.method(method,body).build(),HttpResponse.BodyHandlers.ofByteArray())}catch(e:java.io.IOException){throw RetryTransfer("중앙 서버 연결이 끊겼습니다. 연결 복구 후 이어받습니다") }
     }
+    private fun fastTransfer(id:String):Boolean {
+        val response=http("GET","/api/runners/transfer/$id/capabilities")
+        if(response.statusCode()==404)return false
+        transferResponse(response,"전송 기능 확인 대기")
+        return mapper.readTree(response.body()).path("batchProtocol").asInt()==1
+    }
     private fun encode(value:String)=URLEncoder.encode(value,Charsets.UTF_8)
     private fun beginStart(id:String,rawConfig:String)=synchronized(operationLocks.computeIfAbsent(id){Any()}) {
         var spawned=false
+        preparing.add(id)
         try {
+            updateCheckpoint()
             check(processes[id]?.isAlive!=true) { "이미 실행 중입니다" }
             check(!dirty(id).exists()) { "이전 실행의 데이터 인계가 완료되지 않았습니다" }
             check(!instanceRoot(id).resolve("folder-import.pending").exists() && id !in uploading) { "기존 폴더 가져오기가 끝난 뒤 시작하세요" }
@@ -318,7 +357,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             val state=if(!spawned && processes[id]?.isAlive!=true && !dirty(id).exists())"START_FAILED" else "SYNC_FAILED"
             send(RunnerMessage("file-progress",id,detail=mapper.writeValueAsString(FolderImportProgress("FAILED",message=e.message.orEmpty().take(500),direction="TO_RUNNER"))))
             send(RunnerMessage("state",id,state,version(),e.message?.take(300) ?: "시작 실패"))
-        }
+        } finally {preparing.remove(id)}
     }
     private fun reportFolders() {
         val root=home.resolve("instances");if(!root.exists())return
@@ -329,7 +368,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         }}
     }
     private fun importFolder(id:String,rawConfig:String,request:String) {
-        if(!uploading.add(id))return
+        if(updatePauseRequested || !uploading.add(id))return
         try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {
             require(UUID.fromString(request).toString()==request)
             check(processes[id]?.isAlive!=true && !dirty(id).exists() && !orphanAlive(id)) { "서버를 정상 종료하고 기존 파일 인계를 먼저 완료하세요" }
@@ -390,20 +429,28 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             val existing=before.files
             val changed=manifest.files.filter {(path,file)->existing[path]!=file};val total=changed.values.sumOf {it.size};var downloaded=0L;var completed=0
             progress(FolderImportProgress(if(changed.isEmpty())"VERIFYING" else "UPLOADING",0,0,changed.size,total,"동일한 파일은 재사용하고 변경 파일만 다운로드합니다"),true)
-            manifest.files.forEach { (relative,file) ->
-                val target=FileInventory.safePath(stage,relative)
-                target.parent.createDirectories()
-                if(existing[relative]!=file) {
-                    target.outputStream().use { output ->
-                        var offset=0L
-                        while(offset<file.size) {
+            val progressLock=Any()
+            fun advanced(bytes:Long=0,done:Int=0)=synchronized(progressLock){downloaded+=bytes;completed+=done;progress(FolderImportProgress("UPLOADING",completed,downloaded,changed.size,total))}
+            val fast=fastTransfer(id)
+            val groups=if(fast)TransferBatch.groups(changed.keys){changed.getValue(it).size} else changed.keys.map {listOf(it)}
+            TransferBatch.parallel(groups) {group->
+                if(fast && group.all {changed.getValue(it).size<=TransferBatch.SMALL_FILE}) {
+                    val response=http("POST","/api/runners/transfer/$id/files",HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(group)),"application/json")
+                    transferResponse(response,"파일 묶음 다운로드 대기")
+                    val parts=TransferBatch.decode(response.body())
+                    check(parts.map {it.path}.toSet()==group.toSet() && parts.size==group.size)
+                    parts.forEach {part->check(part.offset==0L && part.bytes.size.toLong()==changed.getValue(part.path).size)}
+                    parts.forEach {part->val target=FileInventory.safePath(stage,part.path);target.parent.createDirectories();target.writeBytes(part.bytes)}
+                    advanced(parts.sumOf {it.bytes.size.toLong()},parts.size)
+                } else group.forEach {relative->
+                    val file=changed.getValue(relative);val target=FileInventory.safePath(stage,relative);target.parent.createDirectories()
+                    target.outputStream().use {output->var offset=0L
+                        while(offset<file.size){
                             val part=http("GET","/api/runners/transfer/$id/file?path=${encode(relative)}&offset=$offset")
-                            check(part.statusCode()==200 && part.body().isNotEmpty()) { "서버 파일 다운로드 실패: $relative" }
-                            output.write(part.body());offset+=part.body().size
-                            downloaded+=part.body().size;progress(FolderImportProgress("UPLOADING",completed,downloaded,changed.size,total))
+                            transferResponse(part,"서버 파일 다운로드 대기");check(part.body().isNotEmpty() && part.body().size<=minOf(4L*1024*1024,file.size-offset)) {"서버 파일 크기가 변경됐습니다"}
+                            output.write(part.body());offset+=part.body().size;advanced(part.body().size.toLong())
                         }
-                    }
-                    completed++
+                    };advanced(done=1)
                 }
             }
             progress(FolderImportProgress("VERIFYING",completed,downloaded,changed.size,total,"실행기에서 검증한 파일을 반영하고 있습니다"),true)
@@ -413,7 +460,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             if(diagnosticRoot(id)==null && folders.custom(id))folders.published(id,manifest)
         } finally { if(stage.exists())stage.toFile().deleteRecursively() }
     }
-    private fun startProcess(instance:Instance,onSpawned:()->Unit) {
+    private fun startProcess(instance:Instance,onSpawned:()->Unit) { synchronized(lifecycle) {
+        updateCheckpoint()
         val id=instance.id
         val current=processes.values.filter { it.isAlive }.sumOf { p -> configs.values.firstOrNull { processes[it.id]===p }?.memoryMb?.toLong() ?: 0 }
         val os=java.lang.management.ManagementFactory.getOperatingSystemMXBean() as com.sun.management.OperatingSystemMXBean
@@ -461,8 +509,9 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             uploadStopped(id)
         }
     }
+    }
     private fun uploadStopped(id:String) {
-        if(!dirty(id).exists() || processes[id]?.isAlive==true || orphanAlive(id) || sessionToken==null || !uploading.add(id))return
+        if(updatePauseRequested || !dirty(id).exists() || processes[id]?.isAlive==true || orphanAlive(id) || sessionToken==null || !uploading.add(id))return
         try {
             val receipt=instanceRoot(id).resolve("upload.pending")
             if(receipt.exists()) {
@@ -514,24 +563,34 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             transferResponse(response,"파일 인계 시작 대기")
             val plan=mapper.readValue<RunnerTransferPlan>(response.body())
             if(request==null)atomicText(instanceRoot(id).resolve("upload.pending"),plan.transferId)
-            var uploaded=plan.completedBytes;var completed=plan.completedFiles;val total=if(plan.totalFiles>0)plan.totalBytes else plan.changedFiles.sumOf {files.getValue(it).size};val totalFiles=if(plan.totalFiles>0)plan.totalFiles else plan.changedFiles.size
+            val total=if(plan.totalFiles>0)plan.totalBytes else plan.changedFiles.sumOf {files.getValue(it).size};val totalFiles=if(plan.totalFiles>0)plan.totalFiles else plan.changedFiles.size
+            var uploaded=plan.completedBytes;var completed=plan.completedFiles
+            val progressLock=Any()
+            fun advanced(bytes:Long=0,done:Int=0)=synchronized(progressLock){uploaded+=bytes;completed+=done;progress(FolderImportProgress("UPLOADING",completed,uploaded,totalFiles,total))}
             progress(FolderImportProgress("UPLOADING",completed,uploaded,totalFiles,total),true)
-            plan.changedFiles.forEach { path ->
-                val file=FileInventory.safePath(serverDir(id),path)
-                file.inputStream().use { input ->
-                    var offset=plan.offsets[path] ?: 0L
-                    require(offset in 0..files.getValue(path).size)
-                    input.skipNBytes(offset)
-                    while(true) {
-                        val bytes=input.readNBytes(4*1024*1024)
-                        if(bytes.isEmpty())break
-                        val part=http("PUT","/api/runners/transfer/$id/chunk?transferId=${plan.transferId}&path=${encode(path)}&offset=$offset",HttpRequest.BodyPublishers.ofByteArray(bytes),"application/octet-stream")
-                        transferResponse(part,"파일 청크 전송 대기")
-                        offset+=bytes.size
-                        uploaded+=bytes.size;progress(FolderImportProgress("UPLOADING",completed,uploaded,totalFiles,total))
+            val fast=fastTransfer(id)
+            val groups=if(fast)TransferBatch.groups(plan.changedFiles){files.getValue(it).size} else plan.changedFiles.map {listOf(it)}
+            TransferBatch.parallel(groups) {group->
+                updateCheckpoint()
+                if(fast && group.all {files.getValue(it).size<=TransferBatch.SMALL_FILE}) {
+                    val parts=group.map {path->
+                        val offset=plan.offsets[path] ?: 0L
+                        FileInventory.safePath(serverDir(id),path).inputStream().use {input->input.skipNBytes(offset);TransferPart(path,offset,input.readNBytes(TransferBatch.SMALL_FILE+1))}
                     }
+                    updateCheckpoint()
+                    transferResponse(http("PUT","/api/runners/transfer/$id/batch?transferId=${plan.transferId}",HttpRequest.BodyPublishers.ofByteArray(TransferBatch.encode(parts)),"application/octet-stream"),"묶음 전송 대기")
+                    advanced(parts.sumOf {it.bytes.size.toLong()},parts.size)
+                } else group.forEach {path->
+                    val file=FileInventory.safePath(serverDir(id),path)
+                    file.inputStream().use {input->
+                        var offset=plan.offsets[path] ?: 0L
+                        require(offset in 0..files.getValue(path).size);input.skipNBytes(offset)
+                        while(true){updateCheckpoint();val bytes=input.readNBytes(4*1024*1024);if(bytes.isEmpty())break
+                            val part=http("PUT","/api/runners/transfer/$id/chunk?transferId=${plan.transferId}&path=${encode(path)}&offset=$offset",HttpRequest.BodyPublishers.ofByteArray(bytes),"application/octet-stream")
+                            transferResponse(part,"파일 청크 전송 대기");offset+=bytes.size;advanced(bytes.size.toLong())
+                        }
+                    };advanced(done=1)
                 }
-                completed++;progress(FolderImportProgress("UPLOADING",completed,uploaded,totalFiles,total))
             }
             if(request!=null) {
                 folders.checkWorldStopped(id)

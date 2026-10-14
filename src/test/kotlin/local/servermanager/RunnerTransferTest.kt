@@ -57,6 +57,25 @@ class RunnerTransferTest {
         assertEquals("VERIFYING",progress.last().phase)
     }
 
+    @Test fun `batch validates all paths before writing and resumes only missing bytes after partial failure`() {
+        val (transfer,base,manager,registry)=fixture()
+        val source=temp.resolve("batch-source").createDirectory();source.resolve("one").writeText("first");source.resolve("two").writeText("second")
+        val manifest=FileInventory.collect(source).let {(f,d)->RunnerFileManifest(f,d)}
+        val plan=transfer.begin("runner","instance",manifest,resumeProtocol=1)
+        val invalid=TransferBatch.encode(listOf(TransferPart("one",0,"first".toByteArray()),TransferPart("../escape",0,"bad".toByteArray())))
+        assertFails {transfer.batch("runner","instance",plan.transferId,invalid)}
+        assertFalse(temp.resolve("instance/runner-transfer/${plan.transferId}/one").exists())
+        transfer.upload("runner","instance",plan.transferId,"two",0,"sec".toByteArray())
+        val restarted=RunnerTransfer(manager,registry);val resumed=restarted.begin("runner","instance",manifest,resumeProtocol=1)
+        assertEquals(plan.transferId,resumed.transferId)
+        restarted.batch("runner","instance",plan.transferId,TransferBatch.encode(listOf(TransferPart("one",0,"first".toByteArray()),TransferPart("two",3,"ond".toByteArray()))))
+        restarted.commit("runner","instance",plan.transferId)
+        assertEquals(FileInventory.collect(source),FileInventory.collect(base))
+        doAnswer {call->FileInventory.safePath(base,call.getArgument(1))}.`when`(manager).path(eq("instance") ?: "instance",anyString() ?: "")
+        val downloaded=TransferBatch.decode(restarted.batchFiles("instance",listOf("one","two")))
+        assertEquals(listOf("first","second"),downloaded.map {it.bytes.toString(Charsets.UTF_8)})
+        assertFails {restarted.batchFiles("instance",listOf("../escape"))}
+    }
     @Test fun `bad hash cannot replace central server data`() {
         val (transfer,base,manager)=fixture()
         base.resolve("world.dat").writeText("original")

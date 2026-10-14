@@ -168,6 +168,25 @@ class RunnerTransfer(private val manager:ServerManager,private val registry:Runn
         if(offset+bytes.size==file.size)transfer.files++
         report(transfer,"UPLOADING")
     }
+    fun batch(runner:String,id:String,transferId:String,bytes:ByteArray)=locked(id) {
+        val parts=TransferBatch.decode(bytes)
+        val transfer=pending[transferId] ?: error("먼저 전송을 재개하세요")
+        require(transfer.runnerId==runner && transfer.instanceId==id)
+        transfer.importRequest?.let {manager.checkFolderImport(id,runner,it)}
+        parts.forEach {part->
+            require(part.path in transfer.changed)
+            FileInventory.safePath(transfer.folder,part.path)
+            val file=transfer.manifest.files.getValue(part.path)
+            require(part.offset==(transfer.progress[part.path] ?: 0) && part.bytes.size>0 && part.offset+part.bytes.size==file.size && file.size<=TransferBatch.SMALL_FILE)
+        }
+        parts.forEach {upload(runner,id,transferId,it.path,it.offset,it.bytes)}
+    }
+    fun batchFiles(id:String,paths:List<String>):ByteArray=locked(id) {
+        require(paths.size in 1..TransferBatch.MAX_FILES && paths.distinct().size==paths.size)
+        var total=8L
+        val files=paths.map {path->val file=manager.path(id,path);require(file.isRegularFile() && file.fileSize()<=TransferBatch.SMALL_FILE);total+=file.fileSize()+path.toByteArray().size+16;require(total<=TransferBatch.MAX_BYTES);path to file}
+        TransferBatch.encode(files.map {(path,file)->TransferPart(path,0,file.inputStream().use {it.readNBytes(TransferBatch.SMALL_FILE+1)})})
+    }
     fun commit(runnerId:String,instanceId:String,transferId:String)=locked(instanceId) {
         if(transferState(runnerId,instanceId,transferId)=="COMPLETE") {
             val done=mapper.readValue<TransferReceipt>(receipt(instanceId,transferId).toFile())
@@ -202,6 +221,18 @@ class RunnerTransferApi(private val transfer:RunnerTransfer,private val gateway:
     private fun check(runnerId:String,token:String?,instanceId:String) {
         if(!gateway.authorized(runnerId,token) || manager.instance(instanceId).runnerId!=runnerId)
             throw ResponseStatusException(HttpStatus.FORBIDDEN,"실행기 연결 또는 서버 배정을 확인하세요")
+    }
+    @GetMapping("/{instanceId}/capabilities") fun capabilities(@PathVariable instanceId:String,
+        @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):Map<String,Int> {
+        check(runnerId,token,instanceId);return mapOf("resumeProtocol" to 1,"batchProtocol" to 1,"parallel" to TransferBatch.PARALLEL)
+    }
+    @PutMapping("/{instanceId}/batch") fun batch(@PathVariable instanceId:String,@RequestParam transferId:String,req:jakarta.servlet.http.HttpServletRequest,
+        @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):Map<String,Boolean> {
+        check(runnerId,token,instanceId);val bytes=req.inputStream.readNBytes(TransferBatch.MAX_BYTES+1);require(bytes.size<=TransferBatch.MAX_BYTES);transfer.batch(runnerId,instanceId,transferId,bytes);return mapOf("ok" to true)
+    }
+    @PostMapping("/{instanceId}/files") fun files(@PathVariable instanceId:String,req:jakarta.servlet.http.HttpServletRequest,
+        @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):ResponseEntity<ByteArray> {
+        check(runnerId,token,instanceId);val bytes=req.inputStream.readNBytes(1024*1024+1);require(bytes.size<=1024*1024);val paths=jacksonObjectMapper().readValue<List<String>>(bytes);return ResponseEntity.ok().header("Cache-Control","no-store").body(transfer.batchFiles(instanceId,paths))
     }
     @PostMapping("/{instanceId}/exit") fun exited(@PathVariable instanceId:String,@RequestBody report:RunnerExitReport,
         @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):Map<String,Boolean> {

@@ -2,7 +2,9 @@ import {memo,useEffect,useState} from 'react';
 import {api,ApiError} from './http';
 import {useAuth} from './Auth';
 
-type Runner={id:string;name:string;platform:string;registeredBy:string;createdAt:string;version:string;enabled:boolean;allowedInstanceIds:string[];online:boolean;lastSeen:string|null};
+type Runner={id:string;name:string;platform:string;registeredBy:string;createdAt:string;version:string;enabled:boolean;allowedInstanceIds:string[];online:boolean;lastSeen:string|null;update?:{phase:string;latest:string|null;downloadedBytes:number;totalBytes:number}|null};
+const updateLabels:Record<string,string>={IDLE:'확인 전',REQUESTED:'요청 전달 중',CHECKING:'새 버전 확인 중',DOWNLOADING:'서명 업데이트 다운로드 중',READY:'다운로드·서명 검증 완료',WAITING:'서버 정상 종료 또는 전송 완료 대기',PAUSING:'받은 파일을 보존하고 전송 중지 중',RESTARTING:'실행기 재시작·재연결 중',CURRENT:'최신 버전',FAILED:'업데이트 실패 · 네트워크, 서명 또는 실행기 로그를 확인하세요',UNSUPPORTED:'자동 업데이트 설치판이 필요합니다'};
+function supportsUpdate(version:string){const m=/^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(version);if(!m)return false;const p=m.slice(1,4).map(Number);return p[0]>0||p[1]>4||p[1]===4&&(p[2]>4||p[2]===4&&!m[4]);}
 type Instance={config:{id:string;name:string}};
 
 export const RunnerSettings=memo(function RunnerSettings({instances}:{instances:Instance[]}){
@@ -27,6 +29,15 @@ export const RunnerSettings=memo(function RunnerSettings({instances}:{instances:
  <details><summary>기존 마크 서버 폴더 연결하기</summary><p>웹에서 기존 파일과 같은 종류·Minecraft·로더 버전으로 서버를 생성하세요. 런처 설치는 생략하고 아래 서버 ID를 실행기 설치 창의 ‘기존 마크 서버 폴더’에 입력한 뒤 실제 폴더를 선택하세요. 폴더는 원래 위치에서 실행됩니다. 등록 후 이 서버의 사용을 허용하고 실행 위치를 배정하면 시작할 수 있습니다.</p>{instances.map(({config:i})=><label className="security-label" key={i.id}>{i.name} · 서버 ID<input readOnly value={i.id} onFocus={e=>e.target.select()}/></label>)}<p className="muted">첫 실행은 선택한 폴더를 원본으로 사용합니다. 이후 웹 파일 관리와 실행기 간 동기화가 적용되며 외부에서 폴더를 수정하면 덮어쓰기 대신 재등록을 안내합니다. 기존 서버를 별도 프로그램으로 동시에 실행하지 마세요.</p></details>
  {!rows.length&&<p className="notice">아직 등록된 실행기가 없습니다. 위 단계로 컴퓨터를 등록하면 연결 상태가 여기에 표시됩니다.</p>}
  {rows.map(row=><div className="member" key={row.id}><strong>{row.name} · {row.platform} · {row.online?'온라인':row.enabled?'오프라인':'폐기됨'}</strong><p className="muted">버전 {row.version} · 마지막 연결 {row.lastSeen?new Date(row.lastSeen).toLocaleString():'없음'}</p>
+ <div className="runner-update" aria-label={`${row.name} 업데이트`}>
+ <p role="status">업데이트: {row.update?updateLabels[row.update.phase]||'상태 확인 중':supportsUpdate(row.version)?'연결 후 상태 확인':'최초 1회 실행기를 0.4.4 이상으로 업데이트하세요.'}{row.update?.latest&&` · 대상 ${row.update.latest}`}{!row.online&&' · 현재 오프라인'}</p>
+ {row.update?.phase==='DOWNLOADING'&&row.update.totalBytes>0&&<><progress aria-label={`${row.name} 업데이트 다운로드`} max={row.update.totalBytes} value={row.update.downloadedBytes}/><span> {Math.floor(row.update.downloadedBytes*100/row.update.totalBytes)}%</span></>}
+ {(row.registeredBy===auth.session.user?.id||auth.session.user?.owner)&&<div className="actions">
+ <button disabled={busy||!row.enabled||!row.online||!supportsUpdate(row.version)||['REQUESTED','CHECKING','DOWNLOADING','PAUSING','RESTARTING','UNSUPPORTED'].includes(row.update?.phase||'')} onClick={()=>run(()=>api(`/runners/${row.id}/update`,'POST',{pauseTransfer:false}),'서명 업데이트를 요청했습니다. 게임과 전송을 마치면 적용합니다.')}>원격 업데이트 요청</button>
+ <button disabled={busy||!row.enabled||!row.online||!supportsUpdate(row.version)||['REQUESTED','CHECKING','DOWNLOADING','PAUSING','RESTARTING','UNSUPPORTED'].includes(row.update?.phase||'')} onClick={()=>run(()=>api(`/runners/${row.id}/update`,'POST',{pauseTransfer:true}),'업데이트 준비 후 전송을 잠시 멈추고 재연결해 이어받습니다. 실행 중인 게임은 정상 종료까지 기다립니다.')}>전송 잠시 멈추고 업데이트</button>
+ </div>}
+ <p className="muted">기기 등록자와 소유자만 요청할 수 있습니다. 서명을 검증하며 게임을 강제로 종료하지 않습니다. 구형 실행기는 기존 자동 업데이트를 기다리거나 최신 설치판을 한 번 적용해야 원격 요청을 받을 수 있습니다.</p>
+ </div>
  {row.registeredBy===auth.session.user?.id&&<><p>이 컴퓨터에서 실행해도 되는 서버를 한 번씩 허용하세요.</p><div className="permission-grid">{instances.map(({config:i})=><label key={i.id} className="check-label"><input type="checkbox" disabled={busy||!row.enabled} checked={row.allowedInstanceIds.includes(i.id)} onChange={e=>{const allowed=e.target.checked;run(()=>api(`/runners/${row.id}/allow/${i.id}`,allowed?'PUT':'DELETE'),allowed?'이 서버의 실행을 허용했습니다.':'이 서버의 새 배정을 막았습니다.');}}/>{i.name}</label>)}</div></>}
  {(row.registeredBy===auth.session.user?.id||auth.session.user?.owner)&&<button disabled={busy||!row.enabled} onClick={()=>{if(confirm(`${row.name} 실행기 등록을 폐기할까요?`))run(()=>api(`/runners/${row.id}`,'DELETE'),'실행기를 폐기했습니다.');}}>기기 등록 폐기</button>}
  </div>)}

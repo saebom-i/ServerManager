@@ -75,6 +75,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
                 registry.seen(id,event.version?.take(80) ?: "unknown")
                 manager.pendingFolderImports(id).forEach { (instance,request)->runCatching {importFolder(instance,request)} }
             }
+            "update-status" -> event.detail?.let {runCatching {registry.updateStatus(id,mapper.readValue<RunnerUpdateStatus>(it))}}
             "folder-source" -> event.instanceId?.let { instance ->
                 if(registry.active(id)?.allowedInstanceIds?.contains(instance)==true)runCatching {manager.folderSource(instance,id,event.state.orEmpty(),event.detail)}
             }
@@ -114,6 +115,10 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
             tokens.remove(id);registry.disconnected(id);manager.remoteDisconnected(id)
             sockets.values.filter { it.runnerId==id }.forEach { closeStream(it,false) }
         }
+    }
+    fun requestUpdate(id:String,pause:Boolean):Boolean {
+        check(RunnerUpdateSupport.supported(registry.active(id)?.version.orEmpty()))
+        return connected(id) && send(id,RunnerMessage("update-request",detail=if(pause) "PAUSE_TRANSFER" else "WHEN_IDLE"))
     }
     fun connected(id:String)=sessions[id]?.isOpen==true && registry.online(id)
     fun authorized(id:String,token:String?):Boolean = token!=null && registry.active(id)!=null && connected(id) &&

@@ -88,6 +88,13 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   expect(audit.filter((e:any)=>e.action==='POST /api/runners/transfer/'+ids[0]+'/begin').length).toBeGreaterThanOrEqual(2);
   expect(createHash('sha256').update(await readFile(home+'/profiles/'+ids[0]+'/server/resume-proof.bin')).digest('hex')).toBe(createHash('sha256').update(Buffer.alloc(64*1024*1024,37)).digest('hex'));
   console.log(legacy?'PASS: real beta.8 runners import existing folder through new manager without unknown-field JSON errors.':'PASS: forced signed WSS authentication replacement during live upload preserves transfer ID, received chunks and exact bytes.');
+  if(!legacy){
+   expect(audit.filter((e:any)=>e.action==='PUT /api/runners/transfer/'+ids[0]+'/batch').length).toBeGreaterThan(0);
+   expect(audit.filter((e:any)=>e.action==='PUT /api/runners/transfer/'+ids[0]+'/chunk').length).toBeLessThan(200);
+   expect((await page.request.post('/api/runners/'+devices[0]+'/update',{data:{pauseTransfer:false}})).status()).toBe(403);
+   await expect.poll(async()=> (await api('/runners')).find((r:any)=>r.id===devices[0])?.update?.phase,{timeout:20000}).toBe('UNSUPPORTED');
+   expect((await page.request.post('/api/runners/'+devices[0]+'/update',{data:{pauseTransfer:false},headers:{'X-CSRF-TOKEN':session.csrf}})).status()).toBe(400);
+  }
   const imported=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);
   expect(imported.folderImport.phase).toBe('COMPLETE');expect(imported.pid).toBeNull();
   expect(await readFile(home+'/profiles/'+ids[0]+'/server/original-folder-proof.txt','utf8')).toContain('original folder');
