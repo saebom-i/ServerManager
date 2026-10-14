@@ -75,7 +75,7 @@ class WebDavSync(private val manager:ServerManager,private val settings:WebDavSe
     private val running=mutableSetOf<String>()
     private val successes=mutableMapOf<String,String>()
     private val errors=mutableMapOf<String,String>()
-    private val subscription=manager.onSignal { signal -> if(signal.kind=="stop") {
+    private val subscription=manager.onSignal { signal -> if(signal.kind in setOf("stop","import")) {
         if(settings.view().config.enabled) runCatching { schedule(signal.instanceId) }
         else manager.remoteCloudReady(signal.instanceId)
     } }

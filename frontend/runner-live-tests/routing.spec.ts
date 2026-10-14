@@ -51,6 +51,13 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
    const log=await open(runnerHome+'/test.log','w');const runner=spawn(java,[...trust,'-jar',jar,'--runner'],{env,stdio:['ignore',log.fd,log.fd]});runners.push(runner);await log.close();
    await expect.poll(async()=> (await api('/runners')).find((d:any)=>d.id===device)?.online,{timeout:30000}).toBe(true);
   }
+  // Import an already-bound original folder before launching any Minecraft process.
+  await api('/instances/'+ids[0]+'/import-folder','POST');await waitState(ids[0],'STOPPED');
+  const imported=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);
+  expect(imported.folderImport.phase).toBe('COMPLETE');expect(imported.pid).toBeNull();
+  expect(await readFile(home+'/profiles/'+ids[0]+'/server/original-folder-proof.txt','utf8')).toContain('original folder');
+  expect(await access(runnerHomes[0]+'/instances/'+ids[0]+'/console.log').then(()=>true,()=>false)).toBe(false);
+  await access(home+'/profiles/'+ids[0]+'/server/custom-vanilla.jar');
   // A busy internal port must fail before a JVM starts and release only this instance's lease.
   const row=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);const blocker=net.createServer();
   await new Promise<void>(r=>blocker.listen(row.config.port,'127.0.0.1',r));
@@ -68,6 +75,7 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
    expect((await viewer.request.get('/api/instances/'+ids[0]+'/power-saving')).status()).toBe(200);
    expect((await viewer.request.put('/api/instances/'+ids[0]+'/power-saving',{data:{enabled:false,minutes:30},headers:{'X-CSRF-TOKEN':viewerSession.csrf}})).status()).toBe(403);
    expect((await viewer.request.get('/api/instances/'+ids[1]+'/power-saving')).status()).toBe(403);
+   expect((await viewer.request.post('/api/instances/'+ids[0]+'/import-folder',{headers:{'X-CSRF-TOKEN':viewerSession.csrf}})).status()).toBe(403);
   } finally {await viewerContext.close();}
   expect((await page.request.put('/api/instances/'+ids[0]+'/power-saving',{data:{enabled:false,minutes:30}})).status()).toBe(403);
   const invalid=await page.request.put('/api/instances/'+ids[0]+'/power-saving',{data:{enabled:true,minutes:1},headers:{'X-CSRF-TOKEN':session.csrf}});expect(invalid.status()).toBe(400);

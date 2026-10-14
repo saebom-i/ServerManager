@@ -33,6 +33,7 @@ interface RemoteController {
     fun completed(instance:Instance) {}
     fun sharedGamePort():Int?=null
     fun stopIfEmpty(instance:Instance,requestId:String):Boolean=false
+    fun importFolder(instance:Instance,requestId:String) {error("실행기를 업데이트한 뒤 기존 폴더를 가져오세요")}
 }
 
 class RuntimeState {
@@ -54,6 +55,9 @@ class RuntimeState {
     @Volatile var idleCheckPending=false
     var idleRequestId:String?=null
     var idleRequestAt=0L
+    var folderSource:Map<String,String>?=null
+    var folderImport:FolderImportProgress?=null
+    var fileTransfer:FolderImportProgress?=null
     fun event(kind: String, text: String) = synchronized(this) {
         events.addLast(Event(++seq, Instant.now().toString(), kind, text))
         while(events.size > 10000) events.removeFirst()
@@ -142,7 +146,8 @@ class ServerManager {
     fun view(id: String): Map<String, Any?> {
         val i = instance(id); val r = runtime(id)
         val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive) }
-        return result+mapOf("powerSaving" to powerStatus?.invoke(id))
+        val transfer=synchronized(r) {mapOf("folderSource" to r.folderSource,"folderImport" to r.folderImport,"fileTransfer" to r.fileTransfer)}
+        return result+transfer+mapOf("powerSaving" to powerStatus?.invoke(id))
     }
     private fun validate(req: CreateRequest) {
         require(req.name.isNotBlank() && req.name.length <= 80) { "이름은 1~80자로 입력하세요" }
@@ -177,6 +182,7 @@ class ServerManager {
             checkIdle(r)
             check(r.state in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED")) { "서버가 완전히 종료된 뒤 실행기를 변경하세요" }
             instance(id).runnerId=runnerId
+            r.folderSource=null;r.folderImport=null;r.fileTransfer=null
             save(instance(id))
         }
         return view(id)
@@ -234,11 +240,58 @@ class ServerManager {
         }
     }
     private fun checkIdle(r: RuntimeState) { check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","RUNNING","STOPPING","IMPORTING","TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN")) { "서버가 실행 중이거나 작업 중입니다" } }
+    private fun folderImportMarker(id:String)=root.resolve(id).resolve("folder-import.pending")
+    @Synchronized fun importRemoteFolder(id:String) {
+        val i=instance(id);val r=runtime(id)
+        synchronized(r) {
+            checkIdle(r);val runner=i.runnerId ?: error("기존 폴더를 등록한 실행기를 선택하세요")
+            val previous=r.state;val request=UUID.randomUUID().toString()
+            folderImportMarker(id).writeText(request);root.resolve(id).resolve("remote-lease").writeText(runner)
+            r.state="IMPORTING";r.fileTransfer=null;r.folderImport=FolderImportProgress("SCANNING",message="실행기의 기존 폴더를 확인하고 있습니다")
+            try {(remoteController ?: error("실행기 연결을 확인하세요")).importFolder(i.copy(),request)}
+            catch(e:Exception){folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists();r.state=previous;r.folderImport=FolderImportProgress("FAILED",message=e.message.orEmpty());throw e}
+            r.event("system","Minecraft를 실행하지 않고 기존 서버 폴더를 가져옵니다")
+        }
+    }
+    fun checkFolderImport(id:String,runner:String,request:String) {
+        val r=runtime(id)
+        synchronized(r) {check(instance(id).runnerId==runner && r.state in setOf("IMPORTING","UNKNOWN") && r.remotePid==null && folderImportMarker(id).takeIf {it.exists()}?.readText()==request) { "기존 폴더 가져오기 요청이 만료됐거나 실행기가 변경됐습니다" }}
+    }
+    fun folderImportState(id:String,runner:String,request:String):String {
+        require(instance(id).runnerId==runner)
+        if(root.resolve(id).resolve("folder-import.completed").takeIf {it.exists()}?.readText()==request)return "COMPLETE"
+        return if(folderImportMarker(id).takeIf {it.exists()}?.readText()==request)"PENDING" else "EXPIRED"
+    }
+    fun pendingFolderImports(runner:String):List<Pair<Instance,String>> = instances.values.filter {it.runnerId==runner && runtime(it.id).state=="UNKNOWN"}.mapNotNull {i->
+        folderImportMarker(i.id).takeIf {it.exists()}?.readText()?.let {i.copy() to it}
+    }
+    fun folderSource(id:String,runner:String,state:String,path:String?) {
+        if(instance(id).runnerId!=runner || state !in setOf("PENDING","SYNCED","INVALID"))return
+        val r=runtime(id);synchronized(r){r.folderSource=mapOf("state" to state,"path" to path.orEmpty().take(1000))}
+    }
+    fun folderImportProgress(id:String,runner:String,request:String,progress:FolderImportProgress) {
+        val r=runtime(id);synchronized(r){checkFolderImport(id,runner,request);r.folderImport=progress.validated();r.state="IMPORTING"}
+    }
+    fun fileTransferProgress(id:String,runner:String,progress:FolderImportProgress) {
+        val r=runtime(id);synchronized(r) {
+            if(instance(id).runnerId!=runner || r.state !in setOf("TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN") || !root.resolve(id).resolve("remote-lease").exists())return
+            r.fileTransfer=progress.validated()
+        }
+    }
+    fun folderImportFailed(id:String,runner:String,request:String,detail:String?) {
+        val r=runtime(id)
+        synchronized(r) {
+            checkFolderImport(id,runner,request)
+            folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists()
+            r.state="FAILED";r.folderImport=FolderImportProgress("FAILED",message=detail.orEmpty().take(500));r.event("error","기존 폴더 가져오기 실패: ${detail.orEmpty().take(500)}")
+        }
+    }
     @Synchronized fun start(id: String) {
         val i=instance(id); val r=runtime(id)
         synchronized(r) {
             checkIdle(r); require(r.state != "IMPORT_FAILED") { "실패한 팩은 시작할 수 없습니다. 원본 mrpack에서 다시 가져오세요" }; require(eulaAccepted(id)) { "Minecraft EULA에 먼저 동의하세요" }
             r.activityVersion++;r.stopReason=null;r.idleCheckPending=false;r.idleRequestId=null
+            r.fileTransfer=null
             if(i.runnerId!=null) {
                 val controller=remoteController ?: error("원격 실행기 연결 기능을 사용할 수 없습니다")
                 root.resolve(id).resolve("remote-lease").writeText(i.runnerId!!)
@@ -317,7 +370,7 @@ class ServerManager {
     fun remoteState(id:String,runnerId:String,state:String,detail:String?=null) {
         val i=instance(id);if(i.runnerId!=runnerId || state !in setOf("STARTING","RUNNING","STOPPING","SYNCING","SYNC_FAILED","UNKNOWN")) return
         val r=runtime(id)
-        synchronized(r) { r.state=state;detail?.take(1000)?.let { r.event("system",it) } }
+        synchronized(r) {r.state=state;if(state=="SYNCING"){r.remotePid=null;r.resources=null;r.players=null};if(state=="RUNNING"){r.fileTransfer=r.fileTransfer?.copy(phase="COMPLETE")};if(state=="SYNC_FAILED"){r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("FAILED")).copy(phase="FAILED",message=detail?.take(500) ?: "실행기 연결과 파일 인계 상태를 확인하세요")};detail?.take(1000)?.let { r.event("system",it) } }
     }
     fun remoteStartFailed(id:String,runnerId:String,detail:String?) {
         val i=instance(id);if(i.runnerId!=runnerId)return
@@ -366,13 +419,26 @@ class ServerManager {
     fun remoteDisconnected(runnerId:String) {
         instances.values.filter { it.runnerId==runnerId }.forEach { i ->
             val r=runtime(i.id)
-            synchronized(r) { if(r.state in setOf("STARTING","RUNNING","STOPPING","TRANSFERRING","SYNCING")) { r.state="UNKNOWN";r.players=null;r.resources=null;r.remotePid=null;r.event("system","실행기 연결이 끊겨 서버 상태를 확인할 수 없습니다") } }
+            synchronized(r) {r.folderSource=null; if(r.state in setOf("STARTING","RUNNING","STOPPING","TRANSFERRING","SYNCING","IMPORTING")) { r.state="UNKNOWN";r.players=null;r.resources=null;r.remotePid=null;r.event("system","실행기 연결이 끊겨 서버 상태를 확인할 수 없습니다") } }
         }
     }
-    fun remoteCommitted(id:String,runnerId:String) {
+    fun remoteCommitted(id:String,runnerId:String,importRequest:String?=null) {
         val i=instance(id);require(i.runnerId==runnerId)
         val r=runtime(id)
+        if(importRequest!=null) {
+            checkFolderImport(id,runnerId,importRequest)
+            synchronized(r) {
+                root.resolve(id).resolve("folder-import.completed").writeText(importRequest)
+                folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists()
+                root.resolve(id).resolve("installed.ok").writeText("existing-folder")
+                r.state="STOPPED";r.folderImport=(r.folderImport ?: FolderImportProgress("COMPLETE")).copy(phase="COMPLETE",message="기존 폴더를 가져왔습니다. 파일 관리자에서 확인할 수 있습니다")
+                r.event("system","기존 서버 폴더 가져오기 완료 · 서버를 실행하지 않았습니다")
+            }
+            signal(id,"import","기존 서버 파일 가져오기를 완료했습니다")
+            return
+        }
         val requested=synchronized(r) { val value=r.remoteStopRequested;r.remoteStopRequested=false;r.remoteWorkerReady=false;r.remoteCloudReady=false;r.state="STOPPED";r.players=null;r.resources=null;r.remotePid=null;r.event("system","원격 서버 파일 인계를 완료했습니다");value }
+        synchronized(r){r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("COMPLETE")).copy(phase="COMPLETE",message="서버 파일 인계를 완료했습니다")}
         root.resolve(id).resolve("remote-lease").deleteIfExists()
         remoteController?.completed(i)
         signal(id,"stop",if(requested && r.stopReason=="IDLE")"무인 절전 요청 후 서버 종료와 데이터 인계를 완료했습니다." else if(requested) "종료 요청 후 서버 데이터 인계까지 완료되었습니다." else "서버가 종료되어 데이터 인계를 완료했습니다.")

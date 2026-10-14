@@ -46,7 +46,9 @@ def guide(folder,gui,platform):
 웹에서 같은 종류·버전의 서버를 만들고 ID를 복사한 뒤 원래 폴더를 지정합니다.
 CLI: install.command / install.cmd --server-id=UUID --server-path="기존 서버 폴더"
 JAR 이름이 다르면 --server-jar=paper.jar (Forge/NeoForge는 생략).
-원래 위치에서 실행하며, 정상 종료 후 변경 파일이 관리 서버로 인계됩니다.
+웹 파일 관리자의 기존 폴더 가져오기를 누르면 서버 실행 없이 최초 전송합니다.
+검사·전송 용량이 표시되며 20GB 같은 대용량은 시간이 걸립니다.
+원래 위치에서 실행하며, 이후 정상 종료 시 변경 파일이 관리 서버로 인계됩니다.
 
 Java 포함 / 로그인 자동 대기 선택 가능 / 원격 컴퓨터의 포트포워딩 불필요
 Windows x64, Mac Intel·Apple Silicon 지원. 관리자 권한은 요청하지 않습니다.

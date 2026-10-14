@@ -68,7 +68,18 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         if(message.payload.length>16384) { session.close(CloseStatus.TOO_BIG_TO_PROCESS);return }
         val event=runCatching { mapper.readValue<RunnerMessage>(message.payload) }.getOrNull() ?: return
         when(event.type) {
-            "heartbeat" -> registry.seen(id,event.version?.take(80) ?: "unknown")
+            "heartbeat" -> {
+                registry.seen(id,event.version?.take(80) ?: "unknown")
+                manager.pendingFolderImports(id).forEach { (instance,request)->runCatching {importFolder(instance,request)} }
+            }
+            "folder-source" -> event.instanceId?.let { instance ->
+                if(registry.active(id)?.allowedInstanceIds?.contains(instance)==true)runCatching {manager.folderSource(instance,id,event.state.orEmpty(),event.detail)}
+            }
+            "import-progress" -> if(event.instanceId!=null && event.token!=null && event.detail!=null)runCatching {
+                manager.folderImportProgress(event.instanceId,id,event.token,mapper.readValue<FolderImportProgress>(event.detail))
+            }
+            "file-progress" -> if(event.instanceId!=null && event.detail!=null)runCatching {manager.fileTransferProgress(event.instanceId,id,mapper.readValue<FolderImportProgress>(event.detail))}
+            "import-failed" -> if(event.instanceId!=null && event.token!=null)runCatching {manager.folderImportFailed(event.instanceId,id,event.token,event.detail)}
             "idle-result" -> event.instanceId?.let {manager.remoteIdleResult(it,id,event.detail,event.state=="ACCEPTED")}
             "state" -> {
                 registry.seen(id,event.version?.take(80) ?: "unknown")
@@ -199,6 +210,11 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         if(!send(id,RunnerMessage("start",instanceId=instance.id,detail=mapper.writeValueAsString(instance)))) {
             completed(instance);error("실행기에 시작 명령을 전달하지 못했습니다")
         }
+    }
+    override fun importFolder(instance:Instance,requestId:String) {
+        val id=requireRunner(instance)
+        check(runCatching {SignedUpdates.compare(registry.active(id)!!.version,"0.4.0-beta.8")>=0}.getOrDefault(false)) { "서버 실행기를 beta.8 이상으로 업데이트하세요. 실행기를 다시 시작하면 새 업데이트를 확인합니다" }
+        check(send(id,RunnerMessage("import-folder",instanceId=instance.id,detail=mapper.writeValueAsString(instance),token=requestId))) { "실행기에 가져오기 명령을 전달하지 못했습니다" }
     }
     override fun stop(instance:Instance) { check(send(requireRunner(instance),RunnerMessage("stop",instanceId=instance.id))) { "실행기에 종료 명령을 전달하지 못했습니다" } }
     override fun restart(instance:Instance) { stop(instance) }

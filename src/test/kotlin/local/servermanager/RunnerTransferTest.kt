@@ -37,6 +37,9 @@ class RunnerTransferTest {
         assertEquals("new bytes",base.resolve("new.txt").readText())
         assertFalse(base.resolve("remove.txt").exists())
         verify(manager).remoteCommitted("instance","runner")
+        val progress=mockingDetails(manager).invocations.filter {it.method.name=="fileTransferProgress"}.map {it.arguments[2] as FolderImportProgress}
+        assertTrue(progress.any {it.phase=="UPLOADING" && it.files==1 && it.bytes==9L && it.totalFiles==1 && it.totalBytes==9L})
+        assertEquals("VERIFYING",progress.last().phase)
     }
 
     @Test fun `bad hash cannot replace central server data`() {
@@ -50,5 +53,19 @@ class RunnerTransferTest {
         assertFailsWith<IllegalStateException> { transfer.commit("runner","instance",plan.transferId) }
         assertEquals("original",base.resolve("world.dat").readText())
         verify(manager,never()).remoteCommitted("instance","runner")
+    }
+    @Test fun `initial import requires its ticket and backs up old files before replacing without a game process`() {
+        val (transfer,base,manager)=fixture();val request="fixture-import-request"
+        base.resolve("old-world.dat").writeText("original")
+        val worker=temp.resolve("existing-source").also {it.createDirectories()};worker.resolve("imported.dat").writeText("existing world")
+        val (files,dirs)=FileInventory.collect(worker)
+        val plan=transfer.begin("runner","instance",RunnerFileManifest(files,dirs),request)
+        verify(manager).checkFolderImport("instance","runner",request)
+        transfer.upload("runner","instance",plan.transferId,"imported.dat",0,"existing world".toByteArray())
+        transfer.commit("runner","instance",plan.transferId)
+        assertEquals("existing world",base.resolve("imported.dat").readText())
+        val backup=temp.resolve("instance/runner-backups").listDirectoryEntries().single();assertEquals("original",backup.resolve("old-world.dat").readText())
+        verify(manager).remoteCommitted("instance","runner",request)
+        verify(manager,never()).start(anyString())
     }
 }

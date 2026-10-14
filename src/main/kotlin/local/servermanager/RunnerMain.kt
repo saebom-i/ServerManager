@@ -128,6 +128,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     private val gameStreams=ConcurrentHashMap<Int,Socket>()
     private val configs=ConcurrentHashMap<String,Instance>()
     private val uploading=ConcurrentHashMap.newKeySet<String>()
+    private val operationLocks=ConcurrentHashMap<String,Any>()
     private val stopping=ConcurrentHashMap.newKeySet<String>()
     private val ready=ConcurrentHashMap.newKeySet<String>()
     private val activity=ConcurrentHashMap<String,AtomicLong>()
@@ -172,6 +173,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             }
             if(restartForUpdate()) kotlin.system.exitProcess(75)
             send(RunnerMessage("heartbeat",version=version()))
+            reportFolders()
             processes.forEach { (id,process) -> report(id,process) }
             if(sessionToken!=null) home.resolve("instances").takeIf { it.exists() }?.let { root -> Files.list(root).use { dirs -> dirs.filter { it.isDirectory() && it.resolve("dirty").exists() && processes[it.fileName.toString()]?.isAlive!=true }.forEach { dir ->
                 val id=dir.fileName.toString()
@@ -181,6 +183,9 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                     else workers.submit { uploadStopped(id) }
                 }
             } } }
+            if(sessionToken!=null)home.resolve("instances").takeIf {it.exists()}?.let {root->Files.list(root).use {paths->paths.filter {it.resolve("folder-import.pending").exists()}.forEach {dir->
+                runCatching {val config=dir.resolve("instance.json").readText();val request=dir.resolve("folder-import.pending").readText();workers.submit {importFolder(dir.fileName.toString(),config,request)}}
+            }}}
             closed.await(10,TimeUnit.SECONDS)
         }
         sessionToken=null;connection.set(null)
@@ -189,7 +194,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     fun restartForUpdate():Boolean {
         if(updater?.pending()!=true || processes.values.any { it.isAlive } || uploading.isNotEmpty())return false
         val root=home.resolve("instances")
-        return !root.exists() || Files.list(root).use { paths -> paths.noneMatch { it.resolve("dirty").exists() } }
+        return !root.exists() || Files.list(root).use { paths -> paths.noneMatch { it.resolve("dirty").exists() || it.resolve("folder-import.pending").exists() } }
     }
     fun shutdownGracefully() {
         processes.keys.forEach { stop(it) }
@@ -206,6 +211,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                     when(message.type) {
                         "session" -> { sessionToken=message.token;recoverStates() }
                         "start" -> if(message.instanceId!=null && message.detail!=null) workers.submit { beginStart(message.instanceId,message.detail) }
+                        "import-folder" -> if(message.instanceId!=null && message.detail!=null && message.token!=null)workers.submit {importFolder(message.instanceId,message.detail,message.token)}
                         "stop" -> message.instanceId?.let { stop(it) }
                         "idle-stop" -> if(message.instanceId!=null && message.detail!=null)workers.submit {stopIfEmpty(message.instanceId,message.detail)}
                         "restart" -> message.instanceId?.let { stop(it) }
@@ -277,17 +283,23 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         return client.send(builder.method(method,body).build(),HttpResponse.BodyHandlers.ofByteArray())
     }
     private fun encode(value:String)=URLEncoder.encode(value,Charsets.UTF_8)
-    private fun beginStart(id:String,rawConfig:String) {
+    private fun beginStart(id:String,rawConfig:String)=synchronized(operationLocks.computeIfAbsent(id){Any()}) {
         var spawned=false
         try {
             check(processes[id]?.isAlive!=true) { "이미 실행 중입니다" }
             check(!dirty(id).exists()) { "이전 실행의 데이터 인계가 완료되지 않았습니다" }
+            check(!instanceRoot(id).resolve("folder-import.pending").exists() && id !in uploading) { "기존 폴더 가져오기가 끝난 뒤 시작하세요" }
             val instance=mapper.readValue<Instance>(rawConfig)
             require(instance.id==id && instance.runnerId==identity.id)
             configs[id]=instance
             val root=instanceRoot(id).also { it.createDirectories() }
             root.resolve("instance.json").writeText(mapper.writeValueAsString(instance))
-            folders.checkStopped(id)
+            var lastScan=0L
+            fun scanning(count:Int,bytes:Long) {
+                val now=System.nanoTime();if(count>0 && now-lastScan<1_000_000_000)return;lastScan=now
+                send(RunnerMessage("file-progress",id,detail=mapper.writeValueAsString(FolderImportProgress("SCANNING",count,bytes,message="원래 폴더의 외부 변경과 실행 상태를 확인하고 있습니다",direction="TO_RUNNER"))))
+            }
+            scanning(0,0);folders.checkStopped(id,::scanning)
             folders.prepareRuntime(id,instance)
             send(RunnerMessage("state",id,"TRANSFERRING",version(),"서버 파일을 받고 있습니다"))
             // Local consent makes the existing folder authoritative until its first stopped upload.
@@ -296,10 +308,63 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             startProcess(instance) {spawned=true}
         } catch(e:Exception) {
             val state=if(!spawned && processes[id]?.isAlive!=true && !dirty(id).exists())"START_FAILED" else "SYNC_FAILED"
+            send(RunnerMessage("file-progress",id,detail=mapper.writeValueAsString(FolderImportProgress("FAILED",message=e.message.orEmpty().take(500),direction="TO_RUNNER"))))
             send(RunnerMessage("state",id,state,version(),e.message?.take(300) ?: "시작 실패"))
         }
     }
+    private fun reportFolders() {
+        val root=home.resolve("instances");if(!root.exists())return
+        Files.list(root).use {dirs->dirs.filter {it.resolve("server-folder.properties").isRegularFile()}.forEach {dir->
+            val id=dir.fileName.toString()
+            runCatching {send(RunnerMessage("folder-source",id,if(folders.initial(id))"PENDING" else "SYNCED",version(),folders.directory(id).toString()))}
+                .onFailure {send(RunnerMessage("folder-source",id,"INVALID",version(),"등록한 폴더 경로를 확인하세요"))}
+        }}
+    }
+    private fun importFolder(id:String,rawConfig:String,request:String) {
+        if(!uploading.add(id))return
+        try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {
+            require(UUID.fromString(request).toString()==request)
+            check(processes[id]?.isAlive!=true && !dirty(id).exists() && !orphanAlive(id)) { "서버를 정상 종료하고 기존 파일 인계를 먼저 완료하세요" }
+            val instance=mapper.readValue<Instance>(rawConfig);require(instance.id==id && instance.runnerId==identity.id)
+            val root=instanceRoot(id).also {it.createDirectories()};val pending=root.resolve("folder-import.pending")
+            check(!pending.exists() || pending.readText()==request) { "다른 가져오기 요청이 진행 중입니다" }
+            if(pending.exists()) {
+                val response=http("GET","/api/runners/transfer/$id/import-state?request=$request")
+                check(response.statusCode()==200) { "가져오기 상태를 확인하지 못했습니다" }
+                when(mapper.readTree(response.body()).path("state").asText()) {
+                    "COMPLETE" -> {
+                        val remote=http("GET","/api/runners/transfer/$id/manifest");check(remote.statusCode()==200)
+                        val manifest=mapper.readValue<RunnerFileManifest>(remote.body());val local=FileInventory.collect(serverDir(id)).let {(f,d)->RunnerFileManifest(f,d)}
+                        check(local==manifest) { "반영 완료 후 원래 폴더가 변경됐습니다. 로컬 폴더를 확인하세요" }
+                        folders.published(id,manifest);pending.deleteIfExists();reportFolders();return
+                    }
+                    "EXPIRED" -> {pending.deleteIfExists();error("가져오기 요청이 만료됐습니다. 웹에서 다시 요청하세요")}
+                }
+            }
+            check(folders.custom(id) && folders.initial(id)) { "가져올 기존 폴더가 등록되어 있지 않거나 이미 가져왔습니다" }
+            root.resolve("instance.json").writeText(rawConfig);pending.writeText(request);configs[id]=instance
+            folders.checkWorldStopped(id);folders.prepareRuntime(id,instance)
+            uploadFiles(id,request)
+            pending.deleteIfExists();reportFolders()
+        }} catch(e:Exception) {
+            if(sessionToken!=null) {
+                send(RunnerMessage("import-failed",id,detail=e.message?.take(500) ?: "가져오기 실패",token=request))
+                val marker=instanceRoot(id).resolve("folder-import.pending")
+                // Sending a WebSocket frame is not an acknowledgement. Keep the ticket until
+                // the manager confirms expiration, or recovery confirms the committed files.
+                val state=runCatching {val response=http("GET","/api/runners/transfer/$id/import-state?request=$request");check(response.statusCode()==200);mapper.readTree(response.body()).path("state").asText()}.getOrNull()
+                if(state=="EXPIRED" && marker.takeIf {it.exists()}?.readText()==request)marker.deleteIfExists()
+                if(state=="COMPLETE")send(RunnerMessage("folder-source",id,"INVALID",version(),"가져온 파일과 원래 폴더를 다시 확인하고 있습니다"))
+            }
+        } finally {uploading.remove(id)}
+    }
     private fun pull(id:String) {
+        var lastProgress=0L
+        fun progress(value:FolderImportProgress,force:Boolean=false) {
+            val now=System.nanoTime();if(!force && now-lastProgress<1_000_000_000)return;lastProgress=now
+            send(RunnerMessage("file-progress",id,detail=mapper.writeValueAsString(value.copy(direction="TO_RUNNER"))))
+        }
+        progress(FolderImportProgress("SCANNING",message="실행기로 받을 파일을 대조하고 있습니다"),true)
         val response=http("GET","/api/runners/transfer/$id/manifest")
         check(response.statusCode()==200) { "서버 파일 목록을 받지 못했습니다: HTTP ${response.statusCode()}" }
         val manifest=mapper.readValue<RunnerFileManifest>(response.body())
@@ -307,7 +372,9 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         val stage=folders.stage(id)
         try {
             manifest.directories.forEach { FileInventory.safePath(stage,it).createDirectories() }
-            val existing=serverDir(id).takeIf { it.exists() }?.let { FileInventory.collect(it).first }.orEmpty()
+            val existing=serverDir(id).takeIf { it.exists() }?.let { FileInventory.collect(it) {count,bytes->progress(FolderImportProgress("SCANNING",count,bytes))}.first }.orEmpty()
+            val changed=manifest.files.filter {(path,file)->existing[path]!=file};val total=changed.values.sumOf {it.size};var downloaded=0L;var completed=0
+            progress(FolderImportProgress(if(changed.isEmpty())"VERIFYING" else "UPLOADING",0,0,changed.size,total,"동일한 파일은 재사용하고 변경 파일만 다운로드합니다"),true)
             manifest.files.forEach { (relative,file) ->
                 val target=FileInventory.safePath(stage,relative)
                 target.parent.createDirectories()
@@ -319,11 +386,14 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                             val part=http("GET","/api/runners/transfer/$id/file?path=${encode(relative)}&offset=$offset")
                             check(part.statusCode()==200 && part.body().isNotEmpty()) { "서버 파일 다운로드 실패: $relative" }
                             output.write(part.body());offset+=part.body().size
+                            downloaded+=part.body().size;progress(FolderImportProgress("UPLOADING",completed,downloaded,changed.size,total))
                         }
                     }
+                    completed++
                 }
                 check(target.fileSize()==file.size && FileInventory.digest(target)==file.sha256) { "서버 파일 해시 불일치: $relative" }
             }
+            progress(FolderImportProgress("VERIFYING",completed,downloaded,changed.size,total,"실행기에서 검증한 파일을 반영하고 있습니다"),true)
             val current=serverDir(id)
             if(current.exists()) {
                 val backup=folders.backup(id)
@@ -380,11 +450,31 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     private fun uploadStopped(id:String) {
         if(!dirty(id).exists() || processes[id]?.isAlive==true || orphanAlive(id) || sessionToken==null || !uploading.add(id))return
         try {
-            val (files,dirs)=FileInventory.collect(serverDir(id))
+            uploadFiles(id,null)
+            dirty(id).deleteIfExists()
+            send(RunnerMessage("state",id,"STOPPED",version(),"서버 파일 인계 완료"))
+        } catch(e:Exception) {
+            send(RunnerMessage("file-progress",id,detail=mapper.writeValueAsString(FolderImportProgress("FAILED",message=e.message.orEmpty().take(500)))))
+            send(RunnerMessage("state",id,"SYNC_FAILED",version(),e.message?.take(300) ?: "서버 파일 인계 실패"))
+        }
+        finally { uploading.remove(id) }
+    }
+    private fun uploadFiles(id:String,request:String?) {
+            var lastProgress=0L
+            fun progress(value:FolderImportProgress,force:Boolean=false) {
+                val now=System.nanoTime();if(!force && now-lastProgress<1_000_000_000)return;lastProgress=now
+                send(RunnerMessage(if(request==null)"file-progress" else "import-progress",id,detail=mapper.writeValueAsString(value),token=request))
+            }
+            progress(FolderImportProgress("SCANNING",message="원래 폴더의 파일·해시를 검사하고 있습니다"),true)
+            val snapshot=if(request!=null)FileInventory.snapshot(serverDir(id)) else null
+            val (files,dirs)=FileInventory.collect(serverDir(id)) {count,bytes->progress(FolderImportProgress("SCANNING",count,bytes))}
             val manifest=RunnerFileManifest(files,dirs)
-            val response=http("POST","/api/runners/transfer/$id/begin",HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(RunnerTransferBegin(manifest))),"application/json")
+            val body=if(request==null)mapOf("manifest" to manifest) else mapOf("manifest" to manifest,"importRequest" to request)
+            val response=http("POST","/api/runners/transfer/$id/begin",HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(body)),"application/json")
             check(response.statusCode()==200) { "파일 인계 시작 실패: HTTP ${response.statusCode()}" }
             val plan=mapper.readValue<RunnerTransferPlan>(response.body())
+            var uploaded=0L;var completed=0;val total=plan.changedFiles.sumOf {files.getValue(it).size}
+            progress(FolderImportProgress("UPLOADING",0,0,plan.changedFiles.size,total),true)
             plan.changedFiles.forEach { path ->
                 val file=FileInventory.safePath(serverDir(id),path)
                 file.inputStream().use { input ->
@@ -395,16 +485,19 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                         val part=http("PUT","/api/runners/transfer/$id/chunk?transferId=${plan.transferId}&path=${encode(path)}&offset=$offset",HttpRequest.BodyPublishers.ofByteArray(bytes),"application/octet-stream")
                         check(part.statusCode()==200) { "파일 청크 업로드 실패: HTTP ${part.statusCode()}" }
                         offset+=bytes.size
+                        uploaded+=bytes.size;progress(FolderImportProgress("UPLOADING",completed,uploaded,plan.changedFiles.size,total))
                     }
                 }
+                completed++;progress(FolderImportProgress("UPLOADING",completed,uploaded,plan.changedFiles.size,total))
             }
+            if(request!=null) {
+                folders.checkWorldStopped(id)
+                check(FileInventory.snapshot(serverDir(id))==snapshot) { "가져오는 동안 원래 파일이 변경됐습니다. 중앙 파일은 교체하지 않았습니다. 서버가 정지됐는지 확인하고 다시 시도하세요" }
+            }
+            progress(FolderImportProgress("VERIFYING",completed,uploaded,plan.changedFiles.size,total,"관리 서버에서 해시 검증·반영 중입니다. 대용량 폴더는 시간이 걸릴 수 있습니다"),true)
             val done=http("POST","/api/runners/transfer/$id/commit?transferId=${plan.transferId}")
             check(done.statusCode()==200) { "서버 파일 인계 완료 실패: HTTP ${done.statusCode()}" }
             folders.published(id,manifest)
-            dirty(id).deleteIfExists()
-            send(RunnerMessage("state",id,"STOPPED",version(),"서버 파일 인계 완료"))
-        } catch(e:Exception) { send(RunnerMessage("state",id,"SYNC_FAILED",version(),e.message?.take(300) ?: "서버 파일 인계 실패")) }
-        finally { uploading.remove(id) }
     }
     private fun stop(id:String):Boolean {
         val process=processes[id] ?: return false

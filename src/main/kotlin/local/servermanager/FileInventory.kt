@@ -20,18 +20,24 @@ object FileInventory {
         }
         return hash.digest().joinToString("") { "%02x".format(it) }
     }
-    fun collect(base:Path):Pair<Map<String,CloudFile>,Set<String>> {
+    fun collect(base:Path,onProgress:(Int,Long)->Unit={_,_->}):Pair<Map<String,CloudFile>,Set<String>> {
         val files=linkedMapOf<String,CloudFile>()
         val dirs=linkedSetOf<String>()
+        var bytes=0L
         Files.walk(base).use { paths -> paths.forEach { path ->
             if(path==base) return@forEach
             require(!Files.isSymbolicLink(path)) { "심볼릭 링크가 있어 동기화를 중단했습니다" }
             val relative=base.relativize(path).toString().replace('\\','/')
             safePath(base,relative)
             if(path.isDirectory()) dirs.add(relative)
-            else if(path.isRegularFile()) files[relative]=CloudFile(digest(path),path.fileSize())
+            else if(path.isRegularFile()) {val size=path.fileSize();files[relative]=CloudFile(digest(path),size);bytes+=size;onProgress(files.size,bytes)}
             else error("일반 파일이 아닌 항목이 있어 동기화를 중단했습니다")
         } }
         return files to dirs
     }
+    fun snapshot(base:Path):Map<String,String> = Files.walk(base).use { paths -> paths.filter {it!=base}.iterator().asSequence().associate { path ->
+        require(!Files.isSymbolicLink(path)) { "심볼릭 링크가 있어 동기화를 중단했습니다" }
+        val a=Files.readAttributes(path,java.nio.file.attribute.BasicFileAttributes::class.java)
+        base.relativize(path).toString() to "${a.isDirectory}|${a.size()}|${a.lastModifiedTime()}|${a.fileKey()}"
+    } }
 }

@@ -290,7 +290,7 @@ public final class RunnerSetup {
         System.out.println("Server Manager Runner · CLI 설치\n설치 위치: "+target()+"\n등록·서버 데이터: "+home());
         if(options.folderOnly()) {
             if(!Files.isRegularFile(target().resolve("runner-bootstrap.jar")))throw new IOException("먼저 실행기를 설치하세요.");
-            bindFolder(home(),options.binding());System.out.println("기존 서버 폴더를 연결했습니다. 원래 경로: "+options.binding().path()+"\n웹에서 이 서버의 실행기를 배정한 뒤 시작하세요.");return;
+            bindFolder(home(),options.binding());System.out.println("기존 서버 폴더를 연결했습니다. 원래 경로: "+options.binding().path()+"\n웹에서 실행기를 배정한 뒤 파일 관리자에서 기존 폴더 가져오기를 누르세요.");return;
         }
         BufferedReader input=new BufferedReader(new InputStreamReader(System.in,StandardCharsets.UTF_8));
         boolean registered=Files.isRegularFile(home().resolve("identity.json"));
@@ -384,7 +384,7 @@ public final class RunnerSetup {
                 protected void process(List<String> messages){status.setText(messages.getLast());}
                 protected void done() {
                     Arrays.fill(secret,'\0');progress.setIndeterminate(false);close.setEnabled(true);frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
-                    try {get();progress.setValue(100);status.setText("설치 완료! 관리 웹에서 온라인 상태 확인 → 서버 사용 허용 → 실행 위치 선택");close.setText("완료");}
+                    try {get();progress.setValue(100);status.setText("설치 완료! 웹에서 서버 허용·실행 위치 선택 → 파일 관리자에서 기존 폴더 가져오기");close.setText("완료");}
                     catch(Exception failure) {
                         status.setText(installed?"설치는 완료됐습니다. 등록·연결을 다시 시도하세요.":"설치가 완료되지 않았습니다.");
                         Throwable cause=failure.getCause();showError(cause==null?"설치하지 못했습니다.":cause.getMessage());
