@@ -505,7 +505,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             val snapshot=if(request!=null)FileInventory.snapshot(serverDir(id)) else null
             val (files,dirs)=FileInventory.collect(serverDir(id)) {count,bytes->progress(FolderImportProgress("SCANNING",count,bytes))}
             val manifest=RunnerFileManifest(files,dirs)
-            val body=mapOf("manifest" to manifest,"importRequest" to request,"resumeProtocol" to 1)
+            val capability=http("GET","/api/runners/transfer/$id/transfer-state?transferId=00000000-0000-0000-0000-000000000000")
+            val resumable=if(capability.statusCode()==404)false else {transferResponse(capability,"이어받기 지원 확인 대기");true}
+            val body=mutableMapOf<String,Any>("manifest" to manifest)
+            if(request!=null)body["importRequest"]=request
+            if(resumable)body["resumeProtocol"]=1
             val response=http("POST","/api/runners/transfer/$id/begin",HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(body)),"application/json")
             transferResponse(response,"파일 인계 시작 대기")
             val plan=mapper.readValue<RunnerTransferPlan>(response.body())

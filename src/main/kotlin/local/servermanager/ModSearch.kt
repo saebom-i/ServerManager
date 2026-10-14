@@ -29,7 +29,8 @@ class ModGraph(snapshot:ModInventorySnapshot) {
     }
     fun disable(files:Set<String>):Set<String> {
         require(files.isNotEmpty() && files.all {it in active}) {"비활성화할 모드를 선택하세요"}
-        require(files.intersect(dependencyFiles).isEmpty()) {"다른 활성 모드가 필수로 사용하는 의존성 모드는 비활성화할 수 없습니다: ${files.intersect(dependencyFiles).sorted().joinToString()}"}
+        val blocked=files.intersect(dependencyFiles)
+        require(blocked.isEmpty()) {"필수 의존성 모드는 비활성화할 수 없습니다: "+blocked.sorted().joinToString(" · ") {"$it (사용 중: ${dependencyReasons.getValue(it).joinToString()})"}}
         validateEnabled(active.keys-files)
         return files
     }

@@ -26,6 +26,8 @@ async function rotateFixtureRunnerSession(home:string){
 test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe failed start and stop handoff',async({page,context,browser})=>{
  const home=process.env.SM_RUNNERS_TEST_HOME||'';expect(home.startsWith('/tmp/servermanager-runners.')).toBe(true);
  const java=process.env.SM_RUNNERS_TEST_JAVA!,jar=process.env.SM_RUNNERS_TEST_JAR!;
+ const legacy=process.env.SM_RUNNERS_TEST_LEGACY_JAR;
+ if(legacy)expect(legacy.endsWith('/dist/server-manager-0.4.0-beta.8.jar')).toBe(true);
  const cdp=await context.newCDPSession(page);await cdp.send('WebAuthn.enable');await cdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}});
  await page.goto('/');await page.getByLabel('등록 코드').fill((await readFile(home+'/profiles/security/setup-code.txt','utf8')).trim());await page.getByRole('button',{name:'패스키 등록',exact:true}).click();await expect(page.getByRole('button',{name:'서버 실행기',exact:true})).toBeVisible();
  const session=await (await page.request.get('/api/auth/session')).json();
@@ -69,7 +71,7 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
    const device=JSON.parse(await readFile(runnerHome+'/identity.json','utf8')).id;
    devices.push(device);
    await api('/runners/'+device+'/allow/'+id,'PUT');await api('/instances/'+id+'/runner','PUT',{runnerId:device});
-   const log=await open(runnerHome+'/test.log','w');const runner=spawn(java,[...trust,'-jar',jar,'--runner'],{env,stdio:['ignore',log.fd,log.fd]});runners.push(runner);await log.close();
+   const log=await open(runnerHome+'/test.log','w');const runner=spawn(java,[...trust,'-jar',legacy||jar,'--runner'],{env,stdio:['ignore',log.fd,log.fd]});runners.push(runner);await log.close();
    await expect.poll(async()=> (await api('/runners')).find((d:any)=>d.id===device)?.online,{timeout:30000}).toBe(true);
   }
   // Import an already-bound original folder before launching any Minecraft process.
@@ -78,19 +80,20 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   await expect.poll(async()=>{try{const names=await readdir(cacheRoot);resumedId=names.find(n=>/^[a-f0-9-]{36}$/.test(n))||'';if(!resumedId)return false;const files=await readdir(cacheRoot+'/'+resumedId,{recursive:true});for(const file of files){const info=await stat(cacheRoot+'/'+resumedId+'/'+file);if(info.isFile()&&info.size>=4*1024*1024)return true;}return false;}catch{return false;}},{timeout:120000,intervals:[10,20,30]}).toBe(true);
   // Suspend only the disposable runner before any Minecraft JVM exists so that
   // authentication is replaced while its upload still has pending requests.
-  runners[0].kill('SIGSTOP');
-  try {await rotateFixtureRunnerSession(runnerHomes[0]);} finally {runners[0].kill('SIGCONT');}
+  if(!legacy){runners[0].kill('SIGSTOP');
+   try {await rotateFixtureRunnerSession(runnerHomes[0]);} finally {runners[0].kill('SIGCONT');}}
   await waitState(ids[0],'STOPPED');
   await access(home+'/profiles/'+ids[0]+'/transfer-receipts/'+resumedId+'.json');
   const audit=(await readFile(home+'/profiles/security/audit.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line));
-  expect(audit.filter((e:any)=>e.action==='POST /api/runners/transfer/'+ids[0]+'/begin').length).toBeGreaterThanOrEqual(2);
+  expect(audit.filter((e:any)=>e.action==='POST /api/runners/transfer/'+ids[0]+'/begin').length).toBeGreaterThanOrEqual(legacy?1:2);
   expect(createHash('sha256').update(await readFile(home+'/profiles/'+ids[0]+'/server/resume-proof.bin')).digest('hex')).toBe(createHash('sha256').update(Buffer.alloc(64*1024*1024,37)).digest('hex'));
-  console.log('PASS: forced signed WSS authentication replacement during live upload preserves transfer ID, received chunks and exact bytes.');
+  console.log(legacy?'PASS: real beta.8 runners import existing folder through new manager without unknown-field JSON errors.':'PASS: forced signed WSS authentication replacement during live upload preserves transfer ID, received chunks and exact bytes.');
   const imported=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);
   expect(imported.folderImport.phase).toBe('COMPLETE');expect(imported.pid).toBeNull();
   expect(await readFile(home+'/profiles/'+ids[0]+'/server/original-folder-proof.txt','utf8')).toContain('original folder');
   expect(await access(runnerHomes[0]+'/instances/'+ids[0]+'/console.log').then(()=>true,()=>false)).toBe(false);
   await access(home+'/profiles/'+ids[0]+'/server/custom-vanilla.jar');
+  if(legacy)return;
   // A busy internal port must fail before a JVM starts and release only this instance's lease.
   const row=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);const blocker=net.createServer();
   await new Promise<void>(r=>blocker.listen(row.config.port,'127.0.0.1',r));

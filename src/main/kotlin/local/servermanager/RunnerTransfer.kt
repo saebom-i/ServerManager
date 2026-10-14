@@ -225,8 +225,12 @@ class RunnerTransferApi(private val transfer:RunnerTransfer,private val gateway:
         return ResponseEntity.ok().header("Cache-Control","no-store").body(bytes)
     }
     @PostMapping("/{instanceId}/begin") fun begin(@PathVariable instanceId:String,@RequestBody request:RunnerTransferBegin,
-        @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):RunnerTransferPlan {
-        check(runnerId,token,instanceId);return transfer.begin(runnerId,instanceId,request.manifest,request.importRequest,request.resumeProtocol)
+        @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):Any {
+        check(runnerId,token,instanceId)
+        val plan=transfer.begin(runnerId,instanceId,request.manifest,request.importRequest,request.resumeProtocol)
+        // Older runner ObjectMappers reject unknown fields. Their wire shape must
+        // stay exact even though the manager internally restores full counters.
+        return if(request.resumeProtocol==0)mapOf("transferId" to plan.transferId,"changedFiles" to plan.changedFiles) else plan
     }
     @PutMapping("/{instanceId}/chunk") fun chunk(@PathVariable instanceId:String,@RequestParam transferId:String,@RequestParam path:String,@RequestParam offset:Long,@RequestBody bytes:ByteArray,
         @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):Map<String,Boolean> {

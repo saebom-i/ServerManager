@@ -9,6 +9,19 @@ import kotlin.test.*
 
 class RunnerTransferTest {
     @TempDir lateinit var temp:Path
+    private data class LegacyPlan(val transferId:String,val changedFiles:Set<String>)
+
+    @Test fun `legacy strict runner wire format excludes newly added fields`() {
+        val (transfer,_,manager)=fixture();val gateway=mock(RunnerGateway::class.java)
+        `when`(gateway.authorized("runner","session")).thenReturn(true)
+        val reply=RunnerTransferApi(transfer,gateway,manager).begin("instance",RunnerTransferBegin(RunnerFileManifest(emptyMap(),emptySet())),"runner","session")
+        val mapper=com.fasterxml.jackson.module.kotlin.jacksonObjectMapper()
+        val parsed=mapper.readValue(mapper.writeValueAsBytes(reply),LegacyPlan::class.java)
+        assertTrue(parsed.changedFiles.isEmpty())
+        val instance=mapper.readTree(mapper.writeValueAsBytes(manager.instance("instance")))
+        assertFalse(instance.has("diagnosticSession"))
+        assertTrue(mapper.readTree(mapper.writeValueAsBytes(manager.instance("instance").copy(diagnosticSession="fixture"))).has("diagnosticSession"))
+    }
 
     private data class Fixture(val transfer:RunnerTransfer,val base:Path,val manager:ServerManager,val registry:RunnerRegistry)
     private fun fixture():Fixture {

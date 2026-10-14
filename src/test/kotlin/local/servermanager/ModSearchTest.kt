@@ -9,7 +9,8 @@ class ModSearchTest {
     @Test fun `dependency providers stay enabled while their dependent mods can be disabled`() {
         val lib=mod("lib").let {it.copy(metadata=it.metadata!!.copy(mods=listOf(ModIdentity("lib","1","Library",setOf("alias")))))}
         val g=graph(mod("main","alias"),lib,mod("extra","main"),mod("other"))
-        assertFailsWith<IllegalArgumentException>{g.disable(setOf("lib.jar"))}
+        val blocked=assertFailsWith<IllegalArgumentException>{g.disable(setOf("lib.jar"))}
+        assertTrue(blocked.message.orEmpty().contains("main.jar"))
         assertEquals(listOf("main.jar"),g.dependencyReasons["lib.jar"])
         assertEquals(setOf("extra.jar"),g.disable(setOf("extra.jar")))
         val p=g.plan(setOf("lib.jar","main.jar","other.jar"),setOf("main.jar"))
