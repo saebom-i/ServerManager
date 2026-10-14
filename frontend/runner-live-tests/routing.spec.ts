@@ -157,6 +157,7 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   const result=await modPage();expect(result.next.status).toBe('FOUND');expect(result.next.groups).toHaveLength(1);
   expect(await access(sandbox+'/sm-debug-'+diag.slice(0,8)+'-3/level.dat').then(()=>true,()=>false)).toBe(true);
   expect((await api(modBase+'/diagnostic/trials/1/logs')).some((e:any)=>e.path==='server/logs/latest.log')).toBe(true);
+  await expect(page.locator('.runner-assignment')).toHaveCount(1);
   await page.screenshot({path:'test-results/mod-diagnostic-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});await page.screenshot({path:'test-results/mod-diagnostic-mobile.png',fullPage:true});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);

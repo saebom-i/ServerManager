@@ -21,6 +21,7 @@ class ModSearchTest {
         assertEquals(2,p.groups.size)
         assertEquals(setOf("a.jar","b.jar"),p.groups.first {"a.jar" in it.files}.files.toSet())
         val c=p.groups.first {"c.jar" in it.files}
+        assertEquals(listOf("addon.jar"),c.companions)
         assertEquals(setOf("c.jar","addon.jar"),g.disabled(p,p.groups.map {it.id}.toSet()-c.id))
     }
     @Test fun `missing and unknown dependencies block automatic modification`() {

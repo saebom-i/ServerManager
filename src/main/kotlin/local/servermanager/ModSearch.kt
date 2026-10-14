@@ -47,7 +47,7 @@ class ModGraph(snapshot:ModInventorySnapshot) {
         // A late merge can join earlier groups through a transitive provider.
         var changed=true
         while(changed){changed=false;outer@for(a in groups.indices)for(b in a+1 until groups.size)if(groups[a].intersect(groups[b]).isNotEmpty()){groups[a].addAll(groups.removeAt(b));changed=true;break@outer}}
-        return ModSearchPlan(active.keys.sorted(),suspects.sorted(),fixed.sorted(),(suspects intersect fixed).sorted(),groups.sortedBy {it.min()}.mapIndexed {n,g->ModSearchGroup("g${n+1}",g.sorted())})
+        return ModSearchPlan(active.keys.sorted(),suspects.sorted(),fixed.sorted(),(suspects intersect fixed).sorted(),groups.sortedBy {it.min()}.mapIndexed {n,g->ModSearchGroup("g${n+1}",g.sorted(),(disable(g)-g).sorted())})
     }
     fun disabled(plan:ModSearchPlan,enabledGroups:Set<String>):Set<String> {
         require(enabledGroups.all {g->plan.groups.any {it.id==g}})
@@ -57,7 +57,7 @@ class ModGraph(snapshot:ModInventorySnapshot) {
         return disabled
     }
 }
-data class ModSearchGroup(val id:String,val files:List<String>)
+data class ModSearchGroup(val id:String,val files:List<String>,val companions:List<String> = emptyList())
 data class ModSearchPlan(val original:List<String>,val suspects:List<String>,val fixed:List<String>,val protectedSuspects:List<String>,val groups:List<ModSearchGroup>)
 data class SearchObservation(val groups:List<String>,val verdict:String)
 data class SearchStep(val status:String,val groups:List<String>,val message:String)

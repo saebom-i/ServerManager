@@ -7,7 +7,7 @@ type Identity={id:string;name:string;version:string|null;provides:string[]};
 type Mod={filename:string;enabled:boolean;size:number;sha256:string;warning:string|null;metadata:{mods:Identity[];complete:boolean;warnings:string[];requirements:{owner:string;id:string;kind:string;ranges:string[]}[]}|null};
 type Snapshot={revision:string;mods:Mod[];warnings:string[]};
 type Trial={number:number;round:number;groups:string[];disabled:string[];started:boolean;verdict:string|null;note:string;createdAt:string};
-type Session={id:string;phase:string;round:number;error:string|null;plan:{groups:{id:string;files:string[]}[];fixed:string[];protectedSuspects:string[]};trials:Trial[];findings:string[][]};
+type Session={id:string;phase:string;round:number;error:string|null;plan:{groups:{id:string;files:string[];companions:string[]}[];fixed:string[];protectedSuspects:string[]};trials:Trial[];findings:string[][]};
 type Page={inventoryRevision:string|null;inventory:Snapshot|null;job:{phase:string;message:string;files:number;bytes:number}|null;diagnostic:Session|null;next:{status:string;groups:string[];message:string}|null;active:boolean};
 type Preview={revision:string;enabled:boolean;selected:string[];affected:string[]};
 const verdictLabel:Record<string,string>={PASS:'성공 · 문제 없음',FAIL:'실패 · 원래 문제 재현',INVALID:'판정 불가'};
@@ -30,6 +30,7 @@ export function ModsPanel({id,loader,state,canManage,onChanged,onConsole}:{id:st
  const lastPage=Math.max(0,Math.ceil(filtered.length/75)-1),shownPage=Math.min(page,lastPage);
  const change=(setter:typeof setSelected,value:string,checked:boolean)=>setter(old=>{const next=new Set(old);if(checked)next.add(value);else next.delete(value);return next;});
  const groups=(ids:string[])=>session?.plan.groups.filter(g=>ids.includes(g.id)).flatMap(g=>g.files)||[];
+ const resultFiles=(ids:string[])=>session?.plan.groups.filter(g=>ids.includes(g.id)).flatMap(g=>[...g.files,...(g.companions||[])]).filter((f,n,all)=>all.indexOf(f)===n)||[];
  const requestPreview=async(enabled:boolean)=>{setSending(true);setError('');try{setPreview(await api<Preview>(endpoint+'/toggle-preview','POST',{revision:inv?.revision,files:[...selected],enabled}));}catch(e){setError((e as Error).message);}finally{setSending(false);}};
  const verdict=(value:string,trial=current)=>{if(trial)action('/diagnostic/verdict',{trial:trial.number,verdict:value,note});};
  if(!['Fabric','Forge','NeoForge'].includes(loader))return <section className="settings-panel"><h2>모드 관리</h2><p>Fabric·Forge·NeoForge 서버에서 사용할 수 있습니다.</p></section>;
@@ -43,9 +44,9 @@ export function ModsPanel({id,loader,state,canManage,onChanged,onConsole}:{id:st
    <p>원본 월드와 모드는 보존됩니다. 각 시도는 <strong>새 테스트 월드</strong>에서 실행됩니다. 기존 접속 주소로 들어가 같은 행동을 재현하고, 같은 문제가 발생했는지 직접 판정하세요.</p>
    <p className="muted">자동 판정·자동 재시작·무인 절전·운영 클라우드 동기화는 검사 중에 동작하지 않습니다. 결과를 판정하기 전에는 다음 후보로 넘어가지 않습니다.</p>
    {session.error&&<div className="alert" role="alert">{session.error}</div>}
-   {data?.next&&<div className="mod-search-result" role="status"><strong>{data.next.status==='FOUND'?'재현 원인 후보':data.next.status==='EXHAUSTED'?'탐색 완료':'다음 확인'}</strong><p>{data.next.message}</p>{data.next.status==='FOUND'&&<ul>{groups(data.next.groups).map(f=><li key={f}>{f}</li>)}</ul>}</div>}
+   {data?.next&&<div className="mod-search-result" role="status"><strong>{data.next.status==='FOUND'?'재현 원인 후보':data.next.status==='EXHAUSTED'?'탐색 완료':'다음 확인'}</strong><p>{data.next.message}</p>{data.next.status==='FOUND'&&<div><ul>{resultFiles(data.next.groups).map(f=><li key={f}>{f}</li>)}</ul><p className="muted">필수 의존성 때문에 함께 켜고 꺼진 연결 모드도 포함합니다. 이 묶음 안에서 어느 파일이 원인인지는 분리해 확정할 수 없습니다.</p></div>}</div>}
    {session.plan.protectedSuspects.length>0&&<p className="muted"><ShieldCheck size={15}/> 유지 모드의 의존성이라 후보에서 제외: {session.plan.protectedSuspects.join(', ')}</p>}
-   {session.findings.length>0&&<details open><summary>찾은 원인 {session.findings.length}개</summary><ol>{session.findings.map((g,n)=><li key={n}>{groups(g).join(' + ')}</li>)}</ol><p className="muted">수동 재현 결과입니다. 모든 가능한 충돌을 찾았다는 의미는 아닙니다.</p></details>}
+   {session.findings.length>0&&<details open><summary>찾은 원인 {session.findings.length}개</summary><ol>{session.findings.map((g,n)=><li key={n}>{resultFiles(g).join(' + ')}</li>)}</ol><p className="muted">수동 재현 결과입니다. 모든 가능한 충돌을 찾았다는 의미는 아닙니다.</p></details>}
    {current&&<div className="mod-trial"><h4>시도 {current.number} <span className="muted">{current.groups.length} / {session.plan.groups.length}개 의존성 묶음 활성화</span></h4>
     <details><summary>이번에 켤 의심 모드 ({groups(current.groups).length})</summary><ul>{groups(current.groups).map(f=><li key={f}>{f}</li>)}</ul></details>
     <details><summary>이번에 끌 모드와 필수 연결 모드 ({current.disabled.length})</summary><ul>{current.disabled.map(f=><li key={f}>{f}</li>)}</ul></details>
