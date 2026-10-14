@@ -16,6 +16,7 @@ class WebDavSyncTest {
     @Test fun `WebDAV password stays encrypted and file manifest changes only for changed files`() {
         val manager=mock(ServerManager::class.java)
         `when`(manager.root).thenReturn(temp)
+            `when`(manager.runtime("instance")).thenReturn(RuntimeState())
         `when`(manager.onSignal(any<(ServerSignal)->Unit>() ?: {})).thenReturn(AutoCloseable {})
         val settings=WebDavSettings(manager)
         val password="private-app-password-for-test"
@@ -77,6 +78,7 @@ class WebDavSyncTest {
             val manager=mock(ServerManager::class.java)
             val settings=mock(WebDavSettings::class.java)
             `when`(manager.root).thenReturn(temp)
+            `when`(manager.runtime("instance")).thenReturn(RuntimeState())
             `when`(manager.serverDir("instance")).thenReturn(temp.resolve("server"))
             `when`(manager.view("instance")).thenReturn(mapOf("state" to "STOPPED"))
             `when`(manager.onSignal(any<(ServerSignal)->Unit>() ?: {})).thenReturn(AutoCloseable {})

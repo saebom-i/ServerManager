@@ -35,7 +35,7 @@ class DesktopLifecycle(private val manager:ServerManager,private val context:Con
     val gate=ReentrantReadWriteLock()
     @Volatile var stopping=false
     @Volatile private var requested=false
-    fun idle()=manager.list().all { it["pid"]==null && it["state"] in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED") }
+    fun idle()=manager.list().all { it["pid"]==null && it["diagnosticActive"]!=true && it["modBusy"]!=true && it["state"] in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED") }
     @EventListener(ApplicationReadyEvent::class) fun ready() { System.getenv("SERVER_MANAGER_EXPECTED_VERSION")?.let { expected->check(javaClass.getResourceAsStream("/app-version.txt")!!.bufferedReader().use { it.readText().trim() }==expected) { "업데이트 버전이 일치하지 않습니다" } };System.getenv("SERVER_MANAGER_READY_FILE")?.let { atomicText(Path.of(it),"ready") } }
     fun restartWhenIdle() { check(supervised) { "자동 재시작은 설치 앱에서만 지원합니다" };requested=true }
     @Scheduled(fixedDelay=3000) fun restart() {

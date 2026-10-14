@@ -34,7 +34,7 @@ class AutoRestart(private val manager:ServerManager,private val desktop:DesktopL
         "stop"->{
             val id=signal.instanceId;val exit=signal.exit
             val policy=policy(id)
-            if(exit!=null&&eligible(policy,exit)) {
+            if(!manager.runtime(id).diagnosticActive && exit!=null&&eligible(policy,exit)) {
                 val now=System.currentTimeMillis()
                 val budget=budget(id)
                 val delay=synchronized(budget) {if(budget.recent(now).size>=3)null else budget.delay(now)}

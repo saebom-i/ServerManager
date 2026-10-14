@@ -1,9 +1,9 @@
 name: Runner installer checks
 on:
   push:
-    paths: ['packaging/runner/**', 'scripts/test-runner-setup.py', '.github/workflows/runner-installers.yml', 'src/main/kotlin/local/servermanager/DeltaTransfer.kt', 'src/main/kotlin/local/servermanager/RunnerTransfer.kt', 'src/main/kotlin/local/servermanager/RunnerFolders.kt', 'src/test/kotlin/local/servermanager/*TransferTest.kt', 'src/test/kotlin/local/servermanager/RunnerFoldersTest.kt']
+    paths: ['packaging/runner/**', 'scripts/test-runner-setup.py', '.github/workflows/runner-installers.yml', 'src/main/kotlin/local/servermanager/DeltaTransfer.kt', 'src/main/kotlin/local/servermanager/RunnerTransfer.kt', 'src/main/kotlin/local/servermanager/RunnerFolders.kt', 'src/main/kotlin/local/servermanager/Mod*.kt', 'src/main/kotlin/local/servermanager/RunnerMain.kt', 'src/test/kotlin/local/servermanager/Mod*Test.kt', 'src/test/kotlin/local/servermanager/NestedModsTest.kt', 'src/test/kotlin/local/servermanager/*TransferTest.kt', 'src/test/kotlin/local/servermanager/RunnerFoldersTest.kt']
   pull_request:
-    paths: ['packaging/runner/**', 'scripts/test-runner-setup.py', '.github/workflows/runner-installers.yml', 'src/main/kotlin/local/servermanager/DeltaTransfer.kt', 'src/main/kotlin/local/servermanager/RunnerTransfer.kt', 'src/main/kotlin/local/servermanager/RunnerFolders.kt', 'src/test/kotlin/local/servermanager/*TransferTest.kt', 'src/test/kotlin/local/servermanager/RunnerFoldersTest.kt']
+    paths: ['packaging/runner/**', 'scripts/test-runner-setup.py', '.github/workflows/runner-installers.yml', 'src/main/kotlin/local/servermanager/DeltaTransfer.kt', 'src/main/kotlin/local/servermanager/RunnerTransfer.kt', 'src/main/kotlin/local/servermanager/RunnerFolders.kt', 'src/main/kotlin/local/servermanager/Mod*.kt', 'src/main/kotlin/local/servermanager/RunnerMain.kt', 'src/test/kotlin/local/servermanager/Mod*Test.kt', 'src/test/kotlin/local/servermanager/NestedModsTest.kt', 'src/test/kotlin/local/servermanager/*TransferTest.kt', 'src/test/kotlin/local/servermanager/RunnerFoldersTest.kt']
   workflow_dispatch:
 permissions:
   contents: read
@@ -26,4 +26,4 @@ jobs:
       - run: python scripts/test-runner-setup.py
       - name: Verify file handoff and recovery
         shell: bash
-        run: ./gradlew test --tests local.servermanager.DeltaTransferTest --tests local.servermanager.RunnerTransferTest --tests local.servermanager.RunnerFoldersTest --no-daemon
+        run: ./gradlew test --tests local.servermanager.DeltaTransferTest --tests local.servermanager.RunnerTransferTest --tests local.servermanager.RunnerFoldersTest --tests local.servermanager.ModSearchTest --tests local.servermanager.ModArtifactsTest --tests local.servermanager.NestedModsTest --no-daemon

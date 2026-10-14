@@ -136,7 +136,10 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     private val metrics=ProcessMetrics()
     private val folders=RunnerFolders(home)
     private fun instanceRoot(id:String)=home.resolve("instances").resolve(id)
-    private fun serverDir(id:String)=folders.directory(id)
+    private fun diagnosticRoot(id:String)=configs[id]?.diagnosticSession?.let {sid->
+        require(UUID.fromString(sid).toString()==sid);instanceRoot(id).resolve("diagnostics").resolve(sid)
+    }
+    private fun serverDir(id:String)=diagnosticRoot(id)?.resolve("server") ?: folders.directory(id)
     private fun dirty(id:String)=instanceRoot(id).resolve("dirty")
     private fun orphanAlive(id:String):Boolean {
         val marker=dirty(id)
@@ -299,12 +302,12 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                 val now=System.nanoTime();if(count>0 && now-lastScan<1_000_000_000)return;lastScan=now
                 send(RunnerMessage("file-progress",id,detail=mapper.writeValueAsString(FolderImportProgress("SCANNING",count,bytes,message="원래 폴더의 외부 변경과 실행 상태를 확인하고 있습니다",direction="TO_RUNNER"))))
             }
-            scanning(0,0);folders.checkStopped(id,::scanning)
-            folders.prepareRuntime(id,instance)
+            if(instance.diagnosticSession==null){scanning(0,0);folders.checkStopped(id,::scanning);folders.prepareRuntime(id,instance)}
+            else {serverDir(id).createDirectories();DeltaTransfer.recover(serverDir(id),diagnosticRoot(id)!!.resolve("transfer-backups"))}
             send(RunnerMessage("state",id,"TRANSFERRING",version(),"서버 파일을 받고 있습니다"))
             // Local consent makes the existing folder authoritative until its first stopped upload.
             // Pulling the newly-created empty central profile here would destroy the original world.
-            if(!folders.initial(id))pull(id)
+            if(instance.diagnosticSession!=null || !folders.initial(id))pull(id)
             startProcess(instance) {spawned=true}
         } catch(e:Exception) {
             val state=if(!spawned && processes[id]?.isAlive!=true && !dirty(id).exists())"START_FAILED" else "SYNC_FAILED"
@@ -369,7 +372,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         check(response.statusCode()==200) { "서버 파일 목록을 받지 못했습니다: HTTP ${response.statusCode()}" }
         val manifest=mapper.readValue<RunnerFileManifest>(response.body())
         DeltaTransfer.validate(manifest,serverDir(id))
-        val stage=folders.stage(id)
+        val stage=diagnosticRoot(id)?.resolve("stage-${UUID.randomUUID()}")?.createDirectories() ?: folders.stage(id)
         try {
             manifest.directories.forEach { FileInventory.safePath(stage,it).createDirectories() }
             val before=serverDir(id).takeIf {it.exists()}?.let {base->
@@ -397,8 +400,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             progress(FolderImportProgress("VERIFYING",completed,downloaded,changed.size,total,"실행기에서 검증한 파일을 반영하고 있습니다"),true)
             val current=serverDir(id)
             current.createDirectories()
-            DeltaTransfer.apply(current,stage,before,manifest,folders.transferHistory(id))
-            if(folders.custom(id))folders.published(id,manifest)
+            DeltaTransfer.apply(current,stage,before,manifest,diagnosticRoot(id)?.resolve("transfer-backups") ?: folders.transferHistory(id))
+            if(diagnosticRoot(id)==null && folders.custom(id))folders.published(id,manifest)
         } finally { if(stage.exists())stage.toFile().deleteRecursively() }
     }
     private fun startProcess(instance:Instance,onSpawned:()->Unit) {
@@ -408,8 +411,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         val limit=maxOf(0L,os.totalMemorySize/(1024*1024)-maxOf(1024L,os.totalMemorySize/(1024*1024)/10)-current)
         require(instance.memoryMb.toLong() in 512L..limit) { "실행기 메모리가 부족합니다 (최대 $limit MiB)" }
         val java=javaBin()
-        val args=folders.arguments(id,instance,java,identity.platform=="WINDOWS")
-        Launchers.verifyJava(java,folders.requiredJava(id,instance))
+        val args=if(instance.diagnosticSession!=null)Launchers.arguments(instance,serverDir(id),java,identity.platform=="WINDOWS") else folders.arguments(id,instance,java,identity.platform=="WINDOWS")
+        Launchers.verifyJava(java,if(instance.diagnosticSession!=null)Launchers.requiredJava(instance,serverDir(id)) else folders.requiredJava(id,instance))
         ServerSocket().use {it.bind(InetSocketAddress("127.0.0.1",instance.port))}
         val properties=serverDir(id).resolve("server.properties")
         val values=Properties();properties.inputStream().use { values.load(it) }
@@ -427,7 +430,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         dirty(id).writeText("${process.pid()}|${process.info().startInstant().orElse(Instant.now()).toEpochMilli()}")
         send(RunnerMessage("state",id,"STARTING",version(),"원격 Minecraft 서버 시작",pid=process.pid()))
         workers.submit {
-            val log=instanceRoot(id).resolve("console.log")
+            val log=diagnosticRoot(id)?.resolve("server/logs/server-manager-console.log") ?: instanceRoot(id).resolve("console.log")
+            log.parent.createDirectories()
             log.toFile().appendText("\n--- ${Instant.now()} ---\n")
             FileOutputStream(log.toFile(),true).bufferedWriter().use { writer ->
             process.inputStream.bufferedReader().useLines { lines -> lines.forEach { line ->
@@ -503,7 +507,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
             progress(FolderImportProgress("VERIFYING",completed,uploaded,plan.changedFiles.size,total,"관리 서버에서 해시 검증·반영 중입니다. 대용량 폴더는 시간이 걸릴 수 있습니다"),true)
             val done=http("POST","/api/runners/transfer/$id/commit?transferId=${plan.transferId}")
             check(done.statusCode()==200) { "서버 파일 인계 완료 실패: HTTP ${done.statusCode()}" }
-            folders.published(id,manifest)
+            if(diagnosticRoot(id)==null)folders.published(id,manifest)
     }
     private fun stop(id:String):Boolean {
         val process=processes[id] ?: return false

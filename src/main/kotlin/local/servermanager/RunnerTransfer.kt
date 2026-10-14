@@ -27,7 +27,7 @@ class RunnerTransfer(private val manager:ServerManager,private val registry:Runn
     private val pending=java.util.concurrent.ConcurrentHashMap<String,PendingTransfer>()
     private val locks=java.util.concurrent.ConcurrentHashMap<String,Any>()
     private fun <T> locked(id:String,action:()->T):T=synchronized(locks.computeIfAbsent(id){Any()}) {action()}
-    private fun history(id:String)=manager.root.resolve(id).resolve("runner-backups")
+    private fun history(id:String)=manager.profileDir(id).resolve("runner-backups")
     private fun report(transfer:PendingTransfer,phase:String,message:String="") {
         val value=FolderImportProgress(phase,transfer.files,transfer.bytes,transfer.changed.size,transfer.totalBytes,message)
         if(transfer.importRequest!=null)manager.folderImportProgress(transfer.instanceId,transfer.runnerId,transfer.importRequest,value)

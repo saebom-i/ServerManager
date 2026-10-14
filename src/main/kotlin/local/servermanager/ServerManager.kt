@@ -19,7 +19,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import kotlin.io.path.*
 
-data class Instance(val id: String, var name: String, val loader: String = "NeoForge", val minecraft: String = "1.21.1", var loaderVersion: String, var port: Int, var memoryMb: Int, var javaPath: String, var runnerId:String?=null)
+data class Instance(val id: String, var name: String, val loader: String = "NeoForge", val minecraft: String = "1.21.1", var loaderVersion: String, var port: Int, var memoryMb: Int, var javaPath: String, var runnerId:String?=null, val diagnosticSession:String?=null)
 data class CreateRequest(val name: String, val loaderVersion: String, val port: Int = 25565, val memoryMb: Int = 2048, val javaPath: String = System.getProperty("java.home") + "/bin/java", val loader:String="NeoForge",val minecraft:String="1.21.1")
 data class Event(val seq: Long, val time: String, val kind: String, val text: String)
 data class FileEntry(val name: String, val path: String, val directory: Boolean, val size: Long)
@@ -51,6 +51,9 @@ class RuntimeState {
     @Volatile var remoteCloudReady = false
     @Volatile var remotePid:Long? = null
     @Volatile var diagnosticActive=false
+    @Volatile var diagnosticSession:String?=null
+    @Volatile var modBusy=false
+    @Volatile var cloudSyncActive=false
     @Volatile var activityVersion=0L
     @Volatile var stopReason:String?=null
     @Volatile var idleCheckPending=false
@@ -128,14 +131,23 @@ class ServerManager {
             serverDir(instance.id).createDirectories()
             instances[instance.id] = instance
             val r=RuntimeState()
-            fun initialState()=when {root.resolve(instance.id).resolve("remote-lease").exists()->"UNKNOWN";root.resolve(instance.id).resolve("import.pending").exists()->"IMPORT_FAILED";root.resolve(instance.id).resolve("installed.ok").exists()->"STOPPED";else->"NEW"}
-            val history=root.resolve(instance.id).resolve("runner-backups")
-            val recover=history.exists()
+            root.resolve(instance.id).resolve("diagnostic.active").takeIf {it.exists()}?.readText()?.trim()?.let {sid->
+                require(UUID.fromString(sid).toString()==sid);r.diagnosticSession=sid;r.diagnosticActive=true
+            }
+            fun initialState()=when {root.resolve(instance.id).resolve("remote-lease").exists()->"UNKNOWN";root.resolve(instance.id).resolve("import.pending").takeIf {it.exists()}?.readText()?.let {it!="mod-diagnostic:${r.diagnosticSession}" && it!="mod-toggle"}==true->"IMPORT_FAILED";root.resolve(instance.id).resolve("installed.ok").exists()->"STOPPED";else->"NEW"}
+            val profile=r.diagnosticSession?.let {root.resolve(instance.id).resolve("diagnostics").resolve(it)} ?: root.resolve(instance.id)
+            val history=profile.resolve("runner-backups")
+            val modHistory=root.resolve(instance.id).resolve("mod-backups")
+            val diagnosticMods=profile.resolve("mod-backups")
+            val recover=history.exists() || modHistory.exists() || diagnosticMods.exists() || root.resolve(instance.id).resolve("import.pending").takeIf {it.exists()}?.readText()=="mod-toggle"
             r.recoveringFiles=recover;r.state=if(recover)"SYNCING" else initialState()
             runtimes[instance.id]=r
             if(recover)workers.submit {
                 try {
                     DeltaTransfer.recover(serverDir(instance.id),history)
+                    if(r.diagnosticActive && serverDir(instance.id).resolve("mods").exists())DeltaTransfer.recover(serverDir(instance.id).resolve("mods"),diagnosticMods)
+                    originalServerDir(instance.id).resolve("mods").takeIf {it.exists()}?.let {DeltaTransfer.recover(it,modHistory)}
+                    root.resolve(instance.id).resolve("import.pending").takeIf {it.exists() && it.readText()=="mod-toggle"}?.deleteIfExists()
                     synchronized(r) {r.state=initialState();r.recoveringFiles=false;r.event("system","파일 전송 복구 검사를 완료했습니다")}
                 } catch(e:Exception) {synchronized(r) {r.state="SYNC_FAILED";r.recoveringFiles=false;r.event("error","파일 전송 복구 실패: ${e.message?.take(300)}")}}
             }
@@ -143,7 +155,23 @@ class ServerManager {
     }
     fun instance(id: String): Instance = instances[id] ?: throw IllegalArgumentException("인스턴스를 찾을 수 없습니다")
     fun runtime(id: String): RuntimeState { instance(id); return runtimes.getValue(id) }
-    fun serverDir(id: String): Path = root.resolve(id).resolve("server")
+    fun profileDir(id:String):Path = runtimes[id]?.diagnosticSession?.let {root.resolve(id).resolve("diagnostics").resolve(it)} ?: root.resolve(id)
+    fun serverDir(id: String): Path = profileDir(id).resolve("server")
+    fun originalServerDir(id:String):Path = root.resolve(id).resolve("server")
+    fun reserveMods(id:String,diagnostic:Boolean=false) {val r=runtime(id);synchronized(r){
+        checkIdle(r,diagnostic);check(!r.cloudSyncActive) {"운영 클라우드 동기화가 끝난 뒤 검사하세요"};check(r.state in setOf("STOPPED","FAILED","NEW")) {"서버와 파일 인계를 먼저 완료하세요"}
+        check(!root.resolve(id).resolve("remote-lease").exists() && !root.resolve(id).resolve("folder-import.pending").exists()) {"파일 인계가 진행 중입니다"}
+        if(instance(id).runnerId!=null && r.lastExit!=null)check(r.remoteWorkerReady) {"실행기가 파일 인계를 확인하고 있습니다. 잠시 후 다시 시도하세요"}
+        r.modBusy=true
+    }}
+    fun releaseMods(id:String){runtime(id).modBusy=false}
+    fun diagnosticContext(id:String,sid:String?) {val r=runtime(id);synchronized(r){
+        check(r.modBusy && r.process?.isAlive!=true && !root.resolve(id).resolve("remote-lease").exists())
+        val marker=root.resolve(id).resolve("diagnostic.active");val guard=root.resolve(id).resolve("import.pending")
+        if(sid!=null){require(UUID.fromString(sid).toString()==sid);check(!guard.exists() || guard.readText()=="mod-diagnostic:$sid");guard.writeText("mod-diagnostic:$sid");atomicText(marker,sid)}
+        else {check(!guard.exists() || guard.readText()=="mod-diagnostic:${r.diagnosticSession}");marker.deleteIfExists();guard.deleteIfExists()}
+        r.diagnosticSession=sid;r.diagnosticActive=sid!=null;r.activityVersion++
+    }}
     private fun save(i: Instance) {
         val file = root.resolve(i.id).resolve("instance.json")
         val tmp = file.resolveSibling("instance.json.tmp")
@@ -152,7 +180,7 @@ class ServerManager {
     }
     fun list() = instances.values.sortedBy { it.name }.map { view(it.id) }
     @Synchronized fun <T> withIdle(action:()->T):T {
-        check(list().all { it["pid"]==null && it["state"] in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED") }) { "모든 서버와 작업을 종료한 뒤 네트워크 설정을 변경하세요" }
+        check(list().all { it["pid"]==null && it["diagnosticActive"]!=true && it["modBusy"]!=true && it["state"] in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED") }) { "모든 서버와 작업을 종료한 뒤 네트워크 설정을 변경하세요" }
         return action()
     }
     @Synchronized fun <T> withStopped(id:String,action:()->T):T {
@@ -169,7 +197,7 @@ class ServerManager {
     }
     fun view(id: String): Map<String, Any?> {
         val i = instance(id); val r = runtime(id)
-        val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive) }
+        val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive,"modBusy" to r.modBusy) }
         val transfer=synchronized(r) {mapOf("folderSource" to r.folderSource,"folderImport" to r.folderImport,"fileTransfer" to r.fileTransfer)}
         return result+transfer+mapOf("powerSaving" to powerStatus?.invoke(id),"autoRestart" to autoRestartStatus?.invoke(id))
     }
@@ -263,8 +291,8 @@ class ServerManager {
             } catch(e: Exception) { synchronized(r) { r.process=null; r.state="FAILED"; r.event("error", e.message ?: "설치 실패") } }
         }
     }
-    fun checkTransferReady(id:String) {check(!runtime(id).recoveringFiles) {"중단된 파일 반영을 복구하고 있습니다. 완료 후 다시 시도하세요"}}
-    private fun checkIdle(r: RuntimeState) { check(!r.recoveringFiles) {"파일 복구가 끝난 뒤 다시 시도하세요"};check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","RUNNING","STOPPING","IMPORTING","TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN")) { "서버가 실행 중이거나 작업 중입니다" } }
+    fun checkTransferReady(id:String) {check(!runtime(id).modBusy) {"모드 작업이 진행 중입니다"};check(!runtime(id).recoveringFiles) {"중단된 파일 반영을 복구하고 있습니다. 완료 후 다시 시도하세요"}}
+    private fun checkIdle(r: RuntimeState,allowDiagnostic:Boolean=false) { check(!r.modBusy) {"모드 작업이 진행 중입니다"};check(!r.cloudSyncActive) {"클라우드 동기화가 진행 중입니다"};check(allowDiagnostic || !r.diagnosticActive) {"모드 검사 패널에서 먼저 검사를 일시 중단하거나 종료하세요"}; check(!r.recoveringFiles) {"파일 복구가 끝난 뒤 다시 시도하세요"};check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","RUNNING","STOPPING","IMPORTING","TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN")) { "서버가 실행 중이거나 작업 중입니다" } }
     private fun folderImportMarker(id:String)=root.resolve(id).resolve("folder-import.pending")
     @Synchronized fun importRemoteFolder(id:String) {
         val i=instance(id);val r=runtime(id)
@@ -311,10 +339,12 @@ class ServerManager {
             r.state="FAILED";r.folderImport=FolderImportProgress("FAILED",message=detail.orEmpty().take(500));r.event("error","기존 폴더 가져오기 실패: ${detail.orEmpty().take(500)}")
         }
     }
-    @Synchronized fun start(id: String) {
+    fun start(id:String)=startInternal(id,null)
+    fun startDiagnostic(id:String,session:String)=startInternal(id,session)
+    @Synchronized private fun startInternal(id: String,session:String?) {
         val i=instance(id); val r=runtime(id)
         synchronized(r) {
-            checkIdle(r); require(r.state != "IMPORT_FAILED") { "실패한 팩은 시작할 수 없습니다. 원본 mrpack에서 다시 가져오세요" }; require(eulaAccepted(id)) { "Minecraft EULA에 먼저 동의하세요" }
+            checkIdle(r,true);check(if(r.diagnosticActive)session!=null && session==r.diagnosticSession else session==null) {"모드 검사 패널에서 다음 시도를 준비하고 시작하세요"}; require(r.state != "IMPORT_FAILED") { "실패한 팩은 시작할 수 없습니다. 원본 mrpack에서 다시 가져오세요" }; require(eulaAccepted(id)) { "Minecraft EULA에 먼저 동의하세요" }
             r.activityVersion++;r.stopReason=null;r.idleCheckPending=false;r.idleRequestId=null
             r.discordError.clear();r.exitError=null;r.exitErrorCaptured=false;r.startNotified=false;r.exitReport=null;r.lastExit=null;r.remoteCloudReady=false;r.remoteWorkerReady=false
             r.fileTransfer=null
@@ -322,7 +352,7 @@ class ServerManager {
                 val controller=remoteController ?: error("원격 실행기 연결 기능을 사용할 수 없습니다")
                 root.resolve(id).resolve("remote-lease").writeText(i.runnerId!!)
                 r.remoteStopRequested=false;r.remoteRestartRequested=false;r.state="TRANSFERRING";r.players=null;r.resources=null
-                try { controller.start(i.copy()) } catch(e:Exception) { root.resolve(id).resolve("remote-lease").deleteIfExists();r.state="STOPPED";throw e }
+                try { controller.start(i.copy(diagnosticSession=r.diagnosticSession)) } catch(e:Exception) { root.resolve(id).resolve("remote-lease").deleteIfExists();r.state="STOPPED";throw e }
                 r.event("system","실행기 ${i.runnerId}로 서버 데이터를 인계하고 있습니다")
                 return
             }
@@ -351,7 +381,7 @@ class ServerManager {
     }
     private fun consume(id: String,p: Process) {
         val r=runtime(id)
-        val log=root.resolve(id).resolve("console.log")
+        val log=profileDir(id).resolve("console.log")
         log.toFile().appendText("\n--- ${Instant.now()} ---\n")
         java.io.FileOutputStream(log.toFile(),true).bufferedWriter().use { writer ->
             p.inputStream.bufferedReader().useLines { lines -> lines.forEach { raw ->
@@ -387,7 +417,7 @@ class ServerManager {
         else command(id,"stop")
     } }
     fun restart(id: String) {
-        val r=runtime(id)
+        val r=runtime(id);check(!r.diagnosticActive) {"모드 검사에서는 각 시도를 종료한 뒤 패널에서 다시 시작하세요"}
         if(instance(id).runnerId!=null) {
             synchronized(r) { check(r.state=="RUNNING") { "실행 중인 서버만 재시작할 수 있습니다" };r.stopReason="RESTART";remoteController?.restart(instance(id)) ?: error("실행기 연결이 없습니다");r.remoteStopRequested=true;r.remoteRestartRequested=true;r.state="STOPPING";r.event("system","원격 서버 재시작 요청") }
             return

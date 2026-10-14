@@ -16,6 +16,22 @@ import java.util.Collections
 import kotlin.test.*
 
 class RunnerGatewayTest {
+    @Test fun `diagnostics reject old runners before sending start and carry isolated context on new runners`() {
+        val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java)
+        val instance=Instance("a","A",loaderVersion="21.1.252",port=ServerSocket(0).use {it.localPort},memoryMb=512,javaPath="java",runnerId="runner",diagnosticSession=java.util.UUID.randomUUID().toString())
+        val device=RunnerDevice("runner","fixture","MAC","user","key","now",version="0.4.2",allowedInstanceIds=setOf("a"))
+        `when`(registry.active("runner")).thenReturn(device);`when`(registry.online("runner")).thenReturn(true)
+        val session=mock(WebSocketSession::class.java);`when`(session.attributes).thenReturn(mutableMapOf<String,Any>("runnerId" to "runner"));`when`(session.isOpen).thenReturn(true)
+        val messages=mutableListOf<WebSocketMessage<*>>();doAnswer {messages.add(it.arguments[0] as WebSocketMessage<*>);null}.`when`(session).sendMessage(any())
+        val gateway=RunnerGateway(registry,manager);gateway.afterConnectionEstablished(session);messages.clear()
+        try {
+            assertFailsWith<IllegalStateException>{gateway.start(instance)};assertTrue(messages.isEmpty())
+            `when`(registry.active("runner")).thenReturn(device.copy(version="0.4.3"))
+            gateway.start(instance)
+            val message=jacksonObjectMapper().readValue<RunnerMessage>((messages.single() as TextMessage).payload)
+            assertEquals(instance.diagnosticSession,jacksonObjectMapper().readValue<Instance>(message.detail!!).diagnosticSession)
+        } finally {gateway.completed(instance)}
+    }
     @Test fun `idle requests require a current authorized worker and never fall back to unchecked stop`() {
         val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java)
         val instance=Instance("a","A",loaderVersion="21.1.252",port=25565,memoryMb=512,javaPath="java",runnerId="runner")

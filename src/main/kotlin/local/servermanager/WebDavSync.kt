@@ -76,7 +76,7 @@ class WebDavSync(private val manager:ServerManager,private val settings:WebDavSe
     private val successes=mutableMapOf<String,String>()
     private val errors=mutableMapOf<String,String>()
     private val subscription=manager.onSignal { signal -> if(signal.kind in setOf("stop","import")) {
-        if(settings.view().config.enabled) runCatching { schedule(signal.instanceId) }
+        if(!manager.runtime(signal.instanceId).diagnosticActive && settings.view().config.enabled) runCatching { schedule(signal.instanceId) }
         else manager.remoteCloudReady(signal.instanceId)
     } }
     private fun stateFile(id:String)=manager.root.resolve(id).resolve("webdav-sync.json")
@@ -95,6 +95,14 @@ class WebDavSync(private val manager:ServerManager,private val settings:WebDavSe
         }
     }
     fun syncNow(id:String):CloudManifest {
+        val runtime=manager.runtime(id)
+        val directory=synchronized(runtime) {
+            check(!runtime.diagnosticActive && !runtime.modBusy && !runtime.cloudSyncActive) {"모드 검사·변경 중에는 운영 클라우드에 동기화하지 않습니다"}
+            runtime.cloudSyncActive=true;manager.serverDir(id)
+        }
+        try {return syncFiles(id,directory)}finally {runtime.cloudSyncActive=false}
+    }
+    private fun syncFiles(id:String,directory:Path):CloudManifest {
         val state=manager.view(id)["state"].toString()
         check(state !in setOf("RUNNING","STARTING","STOPPING","INSTALLING","IMPORTING")) { "서버가 완전히 종료된 뒤 동기화할 수 있습니다" }
         val (config,password)=settings.credentials() ?: error("WebDAV 설정이 없습니다")
@@ -106,7 +114,7 @@ class WebDavSync(private val manager:ServerManager,private val settings:WebDavSe
         val remote=client.get("$base/manifest.json")
         val remoteManifest=remote?.first?.let { mapper.readValue<CloudManifest>(it) }
         val localGeneration=readState(id)
-        val (files,dirs)=collect(manager.serverDir(id))
+        val (files,dirs)=collect(directory)
         if(remoteManifest!=null && remoteManifest.generation!=localGeneration && remoteManifest.previous==localGeneration && remoteManifest.files==files && remoteManifest.directories==dirs) {
             writeState(id,remoteManifest.generation)
             return remoteManifest
@@ -117,7 +125,7 @@ class WebDavSync(private val manager:ServerManager,private val settings:WebDavSe
         val changed=files.filter { (path,file)->remoteManifest?.files?.get(path)!=file }
         changed.forEach { (path,file) ->
             val blob="$base/objects/${file.sha256}"
-            if(!client.exists(blob)) client.upload(blob,manager.serverDir(id).resolve(path))
+            if(!client.exists(blob)) client.upload(blob,directory.resolve(path))
         }
         val manifest=CloudManifest(UUID.randomUUID().toString(),localGeneration,files,dirs,Instant.now().toString())
         client.commit("$base/manifest.json",mapper.writeValueAsBytes(manifest),remote?.second)

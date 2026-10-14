@@ -1,7 +1,9 @@
 import {test,expect} from '@playwright/test';
 import {readFile,writeFile,access,open,cp,mkdir,rename,rm,readdir,realpath} from 'node:fs/promises';
-import {spawn, type ChildProcess} from 'node:child_process';
+import {spawn,execFile, type ChildProcess} from 'node:child_process';
 import net from 'node:net';
+import {promisify} from 'node:util';
+import {createHash} from 'node:crypto';
 
 function varint(n:number){const bytes:number[]=[];do{let b=n&127;n>>>=7;if(n)b|=128;bytes.push(b);}while(n);return Buffer.from(bytes);}
 async function freePort(){const socket=net.createServer();await new Promise<void>(r=>socket.listen(0,'127.0.0.1',r));const port=(socket.address() as net.AddressInfo).port;await new Promise<void>(r=>socket.close(()=>r()));return port;}
@@ -27,9 +29,16 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
  try {
   await api('/admin/game-network','PUT',{revision:0,config:{enabled:true,port:shared,baseDomain:'server.example.com',targetHost:'gateway.example.com',defaultInstanceId:null,defaultHostname:'',labels:{},cloudflareEnabled:false,zoneId:''}});
   for(const [index,loader] of ['Vanilla','Fabric'].entries()){
-   const version=loader==='Vanilla'?'1.21.1':(await api('/version-catalog?loader=Fabric&minecraft=1.21.1')).versions[0];
+   const seed=loader==='Fabric'?process.env.SM_RUNNERS_TEST_FABRIC_SEED:undefined;
+   if(seed)expect(seed.startsWith('/tmp/servermanager-runners.')).toBe(true);
+   const version=loader==='Vanilla'?'1.21.1':seed?JSON.parse(await readFile(seed+'/server-manager-runtime.json','utf8')).loaderVersion:(await api('/version-catalog?loader=Fabric&minecraft=1.21.1')).versions[0];
    const row=await api('/instances','POST',{name:'Fixture '+loader,loader,minecraft:'1.21.1',loaderVersion:version,port:await freePort(),memoryMb:1024,javaPath:java});const id=row.config.id;ids.push(id);
-   await api('/instances/'+id+'/install','POST');await waitState(id,'STOPPED');
+   if(seed){
+    // Optional previously verified, disposable runtime fixture; the feature test does not depend on CDN availability.
+    await cp(seed,home+'/profiles/'+id+'/server',{recursive:true});
+    for(const name of ['world','world_nether','world_the_end','logs','crash-reports','mods'])await rm(home+'/profiles/'+id+'/server/'+name,{recursive:true,force:true});
+    await writeFile(home+'/profiles/'+id+'/installed.ok',version);
+   }else{await api('/instances/'+id+'/install','POST');await waitState(id,'STOPPED');}
    const content=`server-ip=127.0.0.1\nserver-port=${row.config.port}\nlevel-type=minecraft:flat\ngenerate-structures=false\nview-distance=2\nsimulation-distance=2\nonline-mode=true\nmotd=Fixture-${index}\n`;
    await api('/instances/'+id+'/text','PUT',{path:'server.properties',content});
    await api('/instances/'+id+'/game-domain','PUT',{label:index?'beta':'alpha'});
@@ -73,6 +82,9 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
    await viewer.goto('/');await viewer.getByLabel('등록 코드').fill(invitation.token);await viewer.getByRole('button',{name:'패스키 등록',exact:true}).click();await expect(viewer.getByRole('button',{name:'서버 실행기',exact:true})).toBeVisible();
    const viewerSession=await (await viewer.request.get('/api/auth/session')).json();
    expect((await viewer.request.get('/api/instances/'+ids[0]+'/power-saving')).status()).toBe(200);
+   expect((await viewer.request.get('/api/instances/'+ids[0]+'/mods')).status()).toBe(200);
+   expect((await viewer.request.get('/api/instances/'+ids[1]+'/mods')).status()).toBe(403);
+   for(const path of ['/refresh','/toggle','/diagnostic','/diagnostic/start','/diagnostic/verdict','/diagnostic/finish'])expect((await viewer.request.post('/api/instances/'+ids[0]+'/mods'+path,{data:{},headers:{'X-CSRF-TOKEN':viewerSession.csrf}})).status()).toBe(403);
    expect((await viewer.request.put('/api/instances/'+ids[0]+'/power-saving',{data:{enabled:false,minutes:30},headers:{'X-CSRF-TOKEN':viewerSession.csrf}})).status()).toBe(403);
    expect((await viewer.request.get('/api/instances/'+ids[1]+'/power-saving')).status()).toBe(403);
    expect((await viewer.request.post('/api/instances/'+ids[0]+'/import-folder',{headers:{'X-CSRF-TOKEN':viewerSession.csrf}})).status()).toBe(403);
@@ -108,6 +120,50 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   expect(JSON.stringify((await query(shared,'alpha.server.example.com')).description)).toContain('Fixture-0');
   await access(runnerHomes[1]+'/instances/'+ids[0]+'/server/custom-vanilla.jar');
   await api('/instances/'+ids[0]+'/stop','POST');await waitState(ids[0],'STOPPED');
+  // Dependency-safe manual mod search executes on the real remote Fabric runner in a separate world.
+  const modId=ids[1],modBase='/instances/'+modId+'/mods',central=home+'/profiles/'+modId+'/server',remote=runnerHomes[1]+'/instances/'+modId+'/server';
+  const hash=async(path:string)=>createHash('sha256').update(await readFile(path)).digest('hex');
+  const worldBefore=[await hash(central+'/world/level.dat'),await hash(remote+'/world/level.dat')];
+  const exec=promisify(execFile);
+  for(const [name,depends] of [['library',{}],['suspect',{library:'*'}],['other',{}]] as const){
+   const source=home+'/mod-fixture-'+name;await mkdir(source,{recursive:true});await writeFile(source+'/fabric.mod.json',JSON.stringify({schemaVersion:1,id:name,version:'1.0.0',name:'Fixture '+name,depends}));
+   await mkdir(central+'/mods',{recursive:true});await exec(java.replace(/java$/, 'jar'),['--create','--file',central+'/mods/'+name+'.jar','-C',source,'fabric.mod.json']);
+  }
+  const modPage=()=>api(modBase+'?inventory=true');
+  const waitMod=async()=>{await expect.poll(async()=> (await modPage()).job?.phase,{timeout:60000}).toBe('COMPLETE');};
+  await api(modBase+'/refresh','POST');await waitMod();let inventory=(await modPage()).inventory;
+  const preview=await api(modBase+'/toggle-preview','POST',{revision:inventory.revision,files:['library.jar'],enabled:false});expect(preview.affected).toEqual(['library.jar','suspect.jar']);
+  expect((await page.request.post('/api'+modBase+'/toggle',{data:{revision:inventory.revision,files:['library.jar'],enabled:false}})).status()).toBe(403);
+  await api(modBase+'/toggle','POST',{revision:inventory.revision,files:['library.jar'],enabled:false});await waitMod();inventory=(await modPage()).inventory;
+  expect(inventory.mods.filter((m:any)=>!m.enabled).map((m:any)=>m.filename)).toEqual(['library.jar.disabled','suspect.jar.disabled']);
+  await api(modBase+'/toggle','POST',{revision:inventory.revision,files:['library.jar.disabled','suspect.jar.disabled'],enabled:true});await waitMod();
+  await page.getByRole('button',{name:/Fixture Fabric Fabric/}).click();await page.getByRole('button',{name:'모드 · 문제 찾기',exact:true}).click();
+  await page.getByLabel('suspect.jar 의심 모드',{exact:true}).check();await page.getByLabel('other.jar 의심 모드',{exact:true}).check();await page.getByLabel('library.jar 항상 유지',{exact:true}).check();
+  await page.getByRole('button',{name:'선택한 2개에서 문제 모드 찾기',exact:true}).click();await waitMod();
+  await expect(page.getByRole('button',{name:'이 조합으로 테스트 시작',exact:true})).toBeEnabled();
+  const diag=(await modPage()).diagnostic.id,sandbox=home+'/profiles/'+modId+'/diagnostics/'+diag+'/server',runnerSandbox=runnerHomes[1]+'/instances/'+modId+'/diagnostics/'+diag+'/server';
+  expect(await access(sandbox+'/world/level.dat').then(()=>true,()=>false)).toBe(false);
+  expect((await page.request.post('/api/instances/'+modId+'/start',{headers:{'X-CSRF-TOKEN':session.csrf}})).status()).toBe(409);
+  for(const verdict of ['FAIL','PASS','FAIL']) {
+   await page.getByRole('button',{name:'이 조합으로 테스트 시작',exact:true}).click();await waitState(modId,'RUNNING');
+   expect(JSON.stringify((await query(shared,'beta.server.example.com')).description)).toContain('Fixture-1');
+   expect(await hash(central+'/world/level.dat')).toBe(worldBefore[0]);expect(await hash(remote+'/world/level.dat')).toBe(worldBefore[1]);
+   expect(await access(runnerSandbox+'/world/level.dat').then(()=>true,()=>false)).toBe(false);
+   await page.getByLabel('재현 상황 / 판정 메모').fill('Manual fixture '+verdict);
+   await page.getByRole('button',{name:verdict==='FAIL'?'이번 시도 실패':'이번 시도 성공',exact:true}).click();await waitState(modId,'STOPPED');
+   await expect.poll(async()=> (await modPage()).diagnostic.phase).toBe('JUDGED');
+   await expect(async()=>{await api(modBase+'/diagnostic/next','POST');}).toPass({timeout:20000,intervals:[1000]});await waitMod();
+  }
+  const result=await modPage();expect(result.next.status).toBe('FOUND');expect(result.next.groups).toHaveLength(1);
+  expect(await access(sandbox+'/sm-debug-'+diag.slice(0,8)+'-3/level.dat').then(()=>true,()=>false)).toBe(true);
+  expect((await api(modBase+'/diagnostic/trials/1/logs')).some((e:any)=>e.path==='server/logs/latest.log')).toBe(true);
+  await page.screenshot({path:'test-results/mod-diagnostic-desktop.png',fullPage:true});
+  await page.setViewportSize({width:390,height:844});await page.screenshot({path:'test-results/mod-diagnostic-mobile.png',fullPage:true});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.setViewportSize({width:1440,height:1000});
+  await expect(async()=>{await api(modBase+'/diagnostic/finish','POST');}).toPass({timeout:20000,intervals:[1000]});await waitMod();
+  expect((await modPage()).active).toBe(false);expect(await hash(central+'/world/level.dat')).toBe(worldBefore[0]);expect(await hash(remote+'/world/level.dat')).toBe(worldBefore[1]);
+  console.log('PASS: real remote isolated manual mod search, dependency disable/restore, explicit verdicts, trial logs, original central and runner worlds unchanged, read-only/CSRF authorization.');
   const accounts=JSON.parse(await readFile(home+'/profiles/security/accounts.json','utf8'));expect(JSON.stringify(accounts)).not.toContain('fixture-only-password');
   console.log('PASS: original-folder direct execution and stable-path restart/backup, custom JAR migration, passkey enrollment, signed WSS runners, shared TCP isolation, busy-port recovery, console and normal save/file handoff.');
  } finally {

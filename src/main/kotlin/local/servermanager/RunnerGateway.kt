@@ -206,6 +206,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
             val version=registry.active(id)?.version ?: "unknown"
             check(runCatching { SignedUpdates.compare(version,"0.4.0-beta.5")>=0 }.getOrDefault(false)) { "선택한 실행기를 beta.5 이상으로 업데이트한 뒤 이 런처를 시작하세요" }
         }
+        if(instance.diagnosticSession!=null)check(runCatching {SignedUpdates.compare(registry.active(id)?.version ?: "unknown","0.4.3")>=0}.getOrDefault(false)) {"격리 모드 검사를 위해 실행기를 0.4.3 이상으로 업데이트하세요"}
         openRelay(instance,id)
         if(!send(id,RunnerMessage("start",instanceId=instance.id,detail=mapper.writeValueAsString(instance)))) {
             completed(instance);error("실행기에 시작 명령을 전달하지 못했습니다")

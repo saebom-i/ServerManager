@@ -16,6 +16,7 @@ class RunnerTransferTest {
         val manager=mock(ServerManager::class.java)
         val registry=mock(RunnerRegistry::class.java)
         `when`(manager.root).thenReturn(temp)
+        `when`(manager.profileDir("instance")).thenReturn(temp.resolve("instance"))
         `when`(manager.serverDir("instance")).thenReturn(base)
         `when`(manager.instance("instance")).thenReturn(Instance("instance","test",loaderVersion="21.1.252",port=25565,memoryMb=512,javaPath="java",runnerId="runner"))
         `when`(registry.active("runner")).thenReturn(RunnerDevice("runner","Mac","MAC","user","key","now",allowedInstanceIds=setOf("instance")))
@@ -73,6 +74,7 @@ class RunnerTransferTest {
         val (transfer,base,manager,registry)=fixture()
         val second=temp.resolve("second/server").also {it.createDirectories()}
         `when`(manager.serverDir("second")).thenReturn(second)
+        `when`(manager.profileDir("second")).thenReturn(temp.resolve("second"))
         `when`(manager.instance("second")).thenReturn(Instance("second","second",loaderVersion="21.1.252",port=25565,memoryMb=512,javaPath="java",runnerId="runner"))
         `when`(registry.active("runner")).thenReturn(RunnerDevice("runner","Mac","MAC","user","key","now",allowedInstanceIds=setOf("instance","second")))
         val wanted=temp.resolve("wanted").createDirectory().also {it.resolve("data").writeText("new")}

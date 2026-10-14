@@ -15,7 +15,7 @@ data class ModArchiveInfo(val format:String,val mods:List<ModIdentity>,val requi
     val clientOnly:Boolean=false,val nestedJars:Boolean=false,val complete:Boolean=true,val warnings:List<String> = emptyList(),
     val languageLoader:String?=null,val languageLoaderRange:String?=null)
 
-/** Metadata only. Never loads classes, expands a JAR, or treats unknown metadata as safe to remove. */
+/** Metadata only; declared nested archives are inspected in bounded temporary files, never loaded. */
 object ModArchive {
     private const val MAX_METADATA=1024*1024
     private val mapper=jacksonObjectMapper()
@@ -25,7 +25,9 @@ object ModArchive {
         require(entry.size in 0..limit.toLong()) {"모드 메타데이터가 너무 큽니다"}
         return jar.getInputStream(entry).use {it.readNBytes(limit+1)}.also {require(it.size<=limit)}
     }
-    fun inspect(file:Path,loader:String):ModArchiveInfo {
+    fun inspect(file:Path,loader:String):ModArchiveInfo = inspect(file,loader,0,Budget())
+    private class Budget(var bytes:Long=0,var count:Int=0)
+    private fun inspect(file:Path,loader:String,depth:Int,budget:Budget):ModArchiveInfo {
         require(loader in setOf("fabric","forge","neoforge"))
         require(file.isRegularFile(NOFOLLOW_LINKS) && !Files.isSymbolicLink(file) && file.fileSize() in 1..256L*1024*1024)
         return ZipFile(file.toFile()).use {jar->
@@ -34,8 +36,8 @@ object ModArchive {
             require(entries.map {it.name}.distinct().size==entries.size) {"중복 JAR 메타데이터가 있습니다"}
             val nested=entries.any {!it.isDirectory && it.name.endsWith(".jar",true)}
             val warnings=mutableListOf<String>()
-            if(nested)warnings.add("중첩 JAR의 의존성은 아직 완전히 검사하지 못했습니다")
-            if(loader=="fabric") {
+
+            val result=if(loader=="fabric") {
                 val entry=jar.getEntry("fabric.mod.json") ?: return@use ModArchiveInfo("unknown",emptyList(),emptyList(),nestedJars=nested,complete=false,warnings=listOf("Fabric 모드 메타데이터가 없습니다"))
                 val node=mapper.readTree(bytes(jar,entry));require(node.isObject)
                 val modId=id(node.path("id").asText())
@@ -97,6 +99,32 @@ object ModArchive {
                 ModArchiveInfo(if(entry.name.endsWith("neoforge.mods.toml"))"neoforge" else "forge",mods,requirements,nestedJars=nested,complete=warnings.isEmpty(),warnings=warnings.distinct(),
                     languageLoader=toml.getString("modLoader")?.let(::id),languageLoaderRange=version(toml.getString("loaderVersion")))
             }
+            val declared=if(loader=="fabric") {
+                jar.getEntry("fabric.mod.json")?.let {mapper.readTree(bytes(jar,it)).path("jars").map {it.path("file").asText()}}.orEmpty()
+            } else jar.getEntry("META-INF/jarjar/metadata.json")?.let {mapper.readTree(bytes(jar,it)).path("jars").map {it.path("path").asText()}}.orEmpty()
+            require(declared.size<=128 && declared.distinct().size==declared.size)
+            val children=mutableListOf<ModArchiveInfo>()
+            for(name in declared) {
+                require(depth<4 && ++budget.count<=128) {"중첩 모드 깊이·개수 제한을 초과했습니다"}
+                require(name.isNotBlank() && !name.startsWith("/") && !name.contains('\\') && name.split('/').none {it in setOf("..",".","")} && name.endsWith(".jar",true)) {"중첩 모드 경로가 올바르지 않습니다"}
+                val entry=jar.getEntry(name) ?: error("선언된 중첩 모드가 없습니다: $name")
+                require(entry.size in 1..32L*1024*1024 && budget.bytes+entry.size<=128L*1024*1024) {"중첩 모드 크기 제한을 초과했습니다"}
+                budget.bytes+=entry.size
+                val tmp=Files.createTempFile("sm-mod-metadata-",".jar")
+                try {
+                    jar.getInputStream(entry).use {input->Files.newOutputStream(tmp).use {out->
+                        val buffer=ByteArray(65536);var count=0L
+                        while(true){val n=input.read(buffer);if(n<0)break;count+=n;require(count<=entry.size);out.write(buffer,0,n)}
+                        require(count==entry.size)
+                    }}
+                    // Jar-in-jar may also declare plain Java libraries without mod metadata.
+                    val child=inspect(tmp,loader,depth+1,budget)
+                    if((child.format!="unknown" || loader=="fabric" || child.nestedJars) && !child.clientOnly)children.add(child)
+                } finally {Files.deleteIfExists(tmp)}
+            }
+            val undeclared=entries.any {!it.isDirectory && it.name.endsWith(".jar",true) && it.name !in declared}
+            val allWarnings=(result.warnings+children.flatMap {it.warnings}+if(undeclared)listOf("선언되지 않은 중첩 JAR가 있어 의존성을 확정할 수 없습니다") else emptyList()).distinct()
+            result.copy(mods=result.mods+children.flatMap {it.mods},requirements=result.requirements+children.flatMap {it.requirements},nestedJars=nested||declared.isNotEmpty(),complete=result.complete && children.all {it.complete} && !undeclared,warnings=allWarnings)
         }
     }
 }
