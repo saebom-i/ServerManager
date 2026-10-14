@@ -29,10 +29,12 @@ tasks.test {
 
 tasks.processResources { inputs.file("VERSION"); doLast { destinationDir.resolve("app-version.txt").writeText(project.version.toString()) } }
 
-val sableBridgeBuild by tasks.registering(Exec::class) {
-    inputs.files(fileTree("sable-bridge/src"),file("sable-bridge/build.gradle"),file("sable-bridge/settings.gradle"))
+val sableBridgeBuild by tasks.registering(JavaExec::class) {
+    inputs.files(fileTree("sable-bridge/src"),file("sable-bridge/build.gradle"),file("sable-bridge/settings.gradle"),file("sable-bridge/LICENSE"))
     outputs.files("sable-bridge/build/libs/servermanager-sable-bridge.jar","sable-bridge/build/libs/isolated-sable-probe.jar")
-    commandLine((if(System.getProperty("os.name").startsWith("Windows")) listOf("cmd","/c","gradlew.bat") else listOf("./gradlew"))+listOf("-p","sable-bridge","jar","probeJar","--no-daemon"))
+    mainClass.set("org.gradle.wrapper.GradleWrapperMain")
+    classpath=files("gradle/wrapper/gradle-wrapper.jar")
+    args("-p",file("sable-bridge").absolutePath,"jar","probeJar","--no-daemon")
 }
 tasks.processResources {
     dependsOn(sableBridgeBuild)
