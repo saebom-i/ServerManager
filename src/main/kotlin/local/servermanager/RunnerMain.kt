@@ -146,6 +146,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
     private fun diagnosticRoot(id:String)=configs[id]?.diagnosticSession?.let {sid->
         require(UUID.fromString(sid).toString()==sid);instanceRoot(id).resolve("diagnostics").resolve(sid)
     }
+    private val workspaces=ConcurrentHashMap<String,RunnerWorkspace>()
+    private val installationProcesses=ConcurrentHashMap<String,Process>()
     private fun serverDir(id:String)=diagnosticRoot(id)?.resolve("server") ?: folders.directory(id)
     private fun dirty(id:String)=instanceRoot(id).resolve("dirty")
     private fun orphanAlive(id:String):Boolean {
@@ -185,6 +187,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
             send(RunnerMessage("heartbeat",version=version()))
             reportUpdate()
             reportFolders()
+            home.resolve("instances").takeIf {it.exists()}?.listDirectoryEntries()?.forEach {dir->dir.resolve("install-result.json").takeIf {it.exists()}?.let {file->runCatching {send(mapper.readValue<RunnerMessage>(file.readText()))}}}
             processes.forEach { (id,process) -> report(id,process) }
             if(sessionToken!=null) home.resolve("instances").takeIf { it.exists() }?.let { root -> Files.list(root).use { dirs -> dirs.filter { it.isDirectory() && it.resolve("dirty").exists() && processes[it.fileName.toString()]?.isAlive!=true }.forEach { dir ->
                 val id=dir.fileName.toString()
@@ -223,19 +226,21 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
         val root=home.resolve("instances")
         val dirs=if(root.exists())root.listDirectoryEntries().filter {it.isDirectory()} else emptyList()
         if(processes.values.any {it.isAlive} || preparing.isNotEmpty() || dirs.any {orphanAlive(it.name)}){service.phase("WAITING");return false}
-        if(uploading.isNotEmpty())return false
+        if(uploading.isNotEmpty() || workspaces.values.any {it.busy()})return false
         if(!updatePauseRequested && dirs.any {it.resolve("dirty").exists() || it.resolve("folder-import.pending").exists()}){service.phase("WAITING");return false}
         updatePauseRequested=true;service.phase("RESTARTING");true
     }
     fun shutdownGracefully() {
         processes.keys.forEach { stop(it) }
         processes.values.forEach { runCatching { it.waitFor() } }
+        installationProcesses.values.forEach {runCatching {it.waitFor()}}
         if(!updatePauseRequested)home.resolve("instances").takeIf { it.exists() }?.let { root -> Files.list(root).use { paths -> paths.filter { it.resolve("dirty").exists() }.forEach { dir -> uploadStopped(dir.fileName.toString()) } } }
         workers.shutdown()
     }
     override fun onOpen(webSocket:WebSocket) { webSocket.request(1) }
     override fun onText(webSocket:WebSocket,data:CharSequence,last:Boolean):CompletionStage<*> {
         synchronized(textBuffer) {
+            if(textBuffer.length+data.length>256*1024){textBuffer.setLength(0);webSocket.abort();return CompletableFuture.completedFuture(null)}
             textBuffer.append(data)
             if(last) {
                 val raw=textBuffer.toString();textBuffer.setLength(0)
@@ -245,6 +250,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
                         "update-request" -> if(message.detail in setOf("WHEN_IDLE","PAUSE_TRANSFER")) {
                             requestUpdate(message.detail=="PAUSE_TRANSFER")
                         }
+                        "workspace" -> if(message.instanceId!=null && message.token!=null && message.detail!=null)workers.submit {workspace(message.instanceId,message.token,message.detail)}
+                        "install" -> if(message.instanceId!=null && message.token!=null && message.detail!=null)workers.submit {installServer(message.instanceId,message.token,message.detail)}
                         "start" -> if(message.instanceId!=null && message.detail!=null) workers.submit { beginStart(message.instanceId,message.detail) }
                         "import-folder" -> if(message.instanceId!=null && message.detail!=null && message.token!=null)workers.submit {importFolder(message.instanceId,message.detail,message.token)}
                         "stop" -> message.instanceId?.let { stop(it) }
@@ -329,6 +336,51 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
         return mapper.readTree(response.body()).path("batchProtocol").asInt()==1
     }
     private fun encode(value:String)=URLEncoder.encode(value,Charsets.UTF_8)
+    private fun workspaceService(id:String)=workspaces.compute(id) {_,previous->
+        val directory=serverDir(id);if(previous?.matches(directory)==true)previous else {check(previous?.busy()!=true);RunnerWorkspace(directory,if(folders.custom(id))serverDir(id).resolveSibling(".servermanager-files-$id") else instanceRoot(id).resolve("file-history"),instanceRoot(id)) {
+                check(processes[id]?.isAlive!=true && !orphanAlive(id) && !dirty(id).exists()) {"서버를 정상 종료한 뒤 파일을 변경하세요"}
+                if(serverDir(id).resolve("server.properties").exists())folders.checkWorldStopped(id)
+            }}}!!
+    private fun workspace(id:String,requestId:String,raw:String) {
+        var reserved=false
+        try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {
+            synchronized(lifecycle){updateCheckpoint();check(preparing.add(id)) {"실행기 작업이 진행 중입니다"};reserved=true}
+            val request=mapper.readValue<WorkspaceRequest>(raw);val instance=request.config
+            require(instance.id==id && instance.runnerId==identity.id && !instance.syncEnabled() && instance.diagnosticSession==null)
+            check(!instanceRoot(id).resolve("folder-import.pending").exists() && id !in uploading) {"기존 파일 인계를 완료하세요"}
+            configs[id]=instance;instanceRoot(id).createDirectories();atomicText(instanceRoot(id).resolve("instance.json"),mapper.writeValueAsString(instance));serverDir(id).createDirectories()
+            val service=workspaceService(id)
+            val result=mapper.writeValueAsString(service.execute(request));require(result.length<=200*1024);send(RunnerMessage("workspace-result",id,"OK",token=requestId,detail=result))
+        }}catch(e:Exception){send(RunnerMessage("workspace-result",id,"ERROR",token=requestId,detail=e.message?.take(500) ?: "파일 작업 실패"))}
+        finally{if(reserved)preparing.remove(id)}
+    }
+    private fun installServer(id:String,ticket:String,raw:String) {
+        var reserved=false
+        try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {
+            synchronized(lifecycle){updateCheckpoint();check(preparing.add(id));reserved=true}
+            require(UUID.fromString(ticket).toString()==ticket)
+            val instance=mapper.readValue<Instance>(raw);require(instance.id==id && instance.runnerId==identity.id && instance.diagnosticSession==null)
+            check(processes[id]?.isAlive!=true && !orphanAlive(id) && !dirty(id).exists() && id !in uploading) {"서버와 파일 인계를 종료하세요"}
+            check(!folders.custom(id)) {"기존 폴더에는 설치하지 않습니다. 폴더 가져오기 또는 동기화 OFF로 기존 서버를 사용하세요"}
+            configs[id]=instance;instanceRoot(id).createDirectories();atomicText(instanceRoot(id).resolve("instance.json"),raw)
+            val base=serverDir(id).also {it.createDirectories()};check(!base.resolve("world").exists()) {"월드가 있는 폴더에는 새로 설치하지 않습니다"}
+            val props=base.resolve("server.properties");if(!props.exists())props.writeText("server-ip=127.0.0.1\nserver-port=${instance.port}\nenable-query=true\nquery.port=${instance.port}\n")
+            base.resolve("eula.txt").writeText("eula=true\n")
+            val installer=LauncherInstaller(LauncherCatalog(home.resolve("launcher-catalogs")))
+            installer.install(instance.copy(javaPath=javaBin()),base,instanceRoot(id).resolve("installer.jar"),{args->
+                val process=ProcessBuilder(args).directory(base.toFile()).redirectErrorStream(true).start();installationProcesses[id]=process
+                try {process.inputStream.bufferedReader().useLines {lines->lines.forEach {line->send(RunnerMessage("log",id,"output",version(),line.take(4096)))}};process.waitFor()}
+                finally{installationProcesses.remove(id,process)}
+            }) {line->send(RunnerMessage("log",id,"output",version(),line.take(4096)))}
+            if(instance.syncEnabled()) {
+                val pending=instanceRoot(id).resolve("folder-import.pending");atomicText(instanceRoot(id).resolve("install-sync.pending"),ticket);atomicText(pending,ticket)
+                uploadFiles(id,ticket);pending.deleteIfExists();instanceRoot(id).resolve("install-sync.pending").deleteIfExists()
+            }
+            val result=RunnerMessage("install-result",id,"OK",token=ticket,detail="실행기에서 ${instance.loader} ${instance.loaderVersion} 설치 완료")
+            atomicText(instanceRoot(id).resolve("install-result.json"),mapper.writeValueAsString(result));send(result)
+        }}catch(e:Exception){if(e is RetryTransfer && instanceRoot(id).resolve("install-sync.pending").exists()){send(RunnerMessage("import-progress",id,token=ticket,detail=mapper.writeValueAsString(FolderImportProgress("RETRYING",message="설치는 완료됐습니다. 연결 복구 후 변경 파일 인계를 재개합니다"))));return};val result=RunnerMessage("install-result",id,"ERROR",token=ticket,detail=e.message?.take(500) ?: "실행기 설치 실패");atomicText(instanceRoot(id).resolve("install-result.json"),mapper.writeValueAsString(result));send(result)}
+        finally{if(reserved)preparing.remove(id)}
+    }
     private fun beginStart(id:String,rawConfig:String)=synchronized(operationLocks.computeIfAbsent(id){Any()}) {
         var spawned=false
         try {
@@ -346,12 +398,12 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
                 val now=System.nanoTime();if(count>0 && now-lastScan<1_000_000_000)return;lastScan=now
                 send(RunnerMessage("file-progress",id,detail=mapper.writeValueAsString(FolderImportProgress("SCANNING",count,bytes,message="원래 폴더의 외부 변경과 실행 상태를 확인하고 있습니다",direction="TO_RUNNER"))))
             }
-            if(instance.diagnosticSession==null){scanning(0,0);folders.checkStopped(id,::scanning);folders.prepareRuntime(id,instance)}
+            if(instance.diagnosticSession==null){if(instance.syncEnabled()){scanning(0,0);folders.checkStopped(id,::scanning)}else {if(folders.custom(id))folders.checkWorldStopped(id);folders.recover(id);workspaceService(id).recover()};folders.prepareRuntime(id,instance)}
             else {serverDir(id).createDirectories();DeltaTransfer.recover(serverDir(id),diagnosticRoot(id)!!.resolve("transfer-backups"))}
             send(RunnerMessage("state",id,"TRANSFERRING",version(),"서버 파일을 받고 있습니다"))
             // Local consent makes the existing folder authoritative until its first stopped upload.
             // Pulling the newly-created empty central profile here would destroy the original world.
-            if(instance.diagnosticSession!=null || !folders.initial(id))pull(id)
+            if(instance.syncEnabled() && (instance.diagnosticSession!=null || !folders.initial(id)))pull(id)
             startProcess(instance) {spawned=true}
         } catch(e:Exception) {
             val state=if(!spawned && processes[id]?.isAlive!=true && !dirty(id).exists())"START_FAILED" else "SYNC_FAILED"
@@ -383,16 +435,16 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
                         val remote=http("GET","/api/runners/transfer/$id/manifest");transferResponse(remote,"반영된 파일 목록 확인 대기")
                         val manifest=mapper.readValue<RunnerFileManifest>(remote.body());val local=FileInventory.collect(serverDir(id)).let {(f,d)->RunnerFileManifest(f,d)}
                         check(local==manifest) { "반영 완료 후 원래 폴더가 변경됐습니다. 로컬 폴더를 확인하세요" }
-                        folders.published(id,manifest);pending.deleteIfExists();reportFolders();return
+                        folders.published(id,manifest);pending.deleteIfExists();instanceRoot(id).resolve("install-sync.pending").deleteIfExists();reportFolders();return
                     }
                     "EXPIRED" -> {pending.deleteIfExists();error("가져오기 요청이 만료됐습니다. 웹에서 다시 요청하세요")}
                 }
             }
-            check(folders.custom(id) && folders.initial(id)) { "가져올 기존 폴더가 등록되어 있지 않거나 이미 가져왔습니다" }
+            check((folders.custom(id) && folders.initial(id)) || !instance.syncEnabled() || instanceRoot(id).resolve("install-sync.pending").takeIf {it.exists()}?.readText()==request) { "가져올 기존 폴더가 등록되어 있지 않거나 이미 가져왔습니다" }
             root.resolve("instance.json").writeText(rawConfig);pending.writeText(request);configs[id]=instance
             folders.checkWorldStopped(id);folders.prepareRuntime(id,instance)
             uploadFiles(id,request)
-            pending.deleteIfExists();reportFolders()
+            pending.deleteIfExists();instanceRoot(id).resolve("install-sync.pending").deleteIfExists();reportFolders()
         }} catch(e:Exception) {
             if(e is RetryTransfer) {
                 send(RunnerMessage("import-progress",id,detail=mapper.writeValueAsString(FolderImportProgress("RETRYING",message="연결 복구 후 이미 받은 파일부터 이어받습니다")),token=request))
@@ -505,7 +557,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
             ready.remove(id)
             stopping.remove(id)
             processes.remove(id,process)
-            send(RunnerMessage("state",id,"SYNCING",version(),"종료 코드 $code · 변경 파일 인계 중"))
+            send(RunnerMessage("state",id,"SYNCING",version(),"종료 코드 $code · "+if(instance.syncEnabled())"변경 파일 인계 중" else "동기화 OFF · 실행기 파일 보존"))
             uploadStopped(id)
         }
     }
@@ -513,6 +565,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
     private fun uploadStopped(id:String) {
         if(!dirty(id).exists() || processes[id]?.isAlive==true || orphanAlive(id) || sessionToken==null || !reserveUpload(id))return
         try {
+            if(configs[id]?.syncEnabled()==false) {
+                check(!instanceRoot(id).resolve("upload.pending").exists()) {"이전 인계를 먼저 완료하세요"}
+                instanceRoot(id).resolve("exit.json").takeIf {it.exists()}?.let {exit->transferResponse(http("POST","/api/runners/transfer/$id/exit",HttpRequest.BodyPublishers.ofString(exit.readText()),"application/json"),"서버 종료 보고 대기")}
+                dirty(id).deleteIfExists();send(RunnerMessage("state",id,"STOPPED",version(),"동기화 OFF · 원본 파일은 현재 실행기에 있습니다"));return
+            }
             val receipt=instanceRoot(id).resolve("upload.pending")
             if(receipt.exists()) {
                 val transfer=receipt.readText().trim();require(UUID.fromString(transfer).toString()==transfer)

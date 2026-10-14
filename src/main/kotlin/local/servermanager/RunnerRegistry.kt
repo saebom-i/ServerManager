@@ -104,7 +104,7 @@ class RunnerRegistry(private val manager:ServerManager,private val auth:AuthStor
     @Synchronized fun online(id:String)=active(id)!=null && (heartbeat[id]?.let { System.currentTimeMillis()-it<45_000 } ?: false)
     @Synchronized fun views(userId:String):List<RunnerView> {
         val user=auth.account(userId) ?: return emptyList()
-        return devices.values.filter { user.owner || it.registeredBy==userId || it.allowedInstanceIds.any { id -> user.permissions[id]=="ADMIN" } }
+        return devices.values.filter { user.managesAllServers() || it.registeredBy==userId || it.allowedInstanceIds.any { id -> user.permissions[id]=="ADMIN" } }
             .map { RunnerView(it.id,it.name,it.platform,it.registeredBy,it.createdAt,it.version,it.enabled,it.allowedInstanceIds,online(it.id),heartbeat[it.id]?.let { ms->Instant.ofEpochMilli(ms).toString() },updates[it.id],remoteUpdateSupported(it.id)) }
     }
     @Synchronized fun connected(id:String){updates.remove(id)}
@@ -144,7 +144,7 @@ class RunnerRegistry(private val manager:ServerManager,private val auth:AuthStor
     }
     @Synchronized fun canAssign(userId:String,instanceId:String,runnerId:String):Boolean {
         val user=auth.account(userId) ?: return false
-        return (user.owner || user.permissions[instanceId]=="ADMIN") && active(runnerId)?.allowedInstanceIds?.contains(instanceId)==true
+        return (user.managesAllServers() || user.permissions[instanceId]=="ADMIN") && active(runnerId)?.allowedInstanceIds?.contains(instanceId)==true
     }
 }
 

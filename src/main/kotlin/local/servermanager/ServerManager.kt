@@ -19,13 +19,16 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import kotlin.io.path.*
 
-data class Instance(val id: String, var name: String, val loader: String = "NeoForge", val minecraft: String = "1.21.1", var loaderVersion: String, var port: Int, var memoryMb: Int, var javaPath: String, var runnerId:String?=null, @get:com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) val diagnosticSession:String?=null)
+data class Instance(val id: String, var name: String, val loader: String = "NeoForge", val minecraft: String = "1.21.1", var loaderVersion: String, var port: Int, var memoryMb: Int, var javaPath: String, var runnerId:String?=null, @get:com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) val diagnosticSession:String?=null, @get:com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) val fileSyncEnabled:Boolean?=null) {fun syncEnabled()=fileSyncEnabled!=false}
 data class CreateRequest(val name: String, val loaderVersion: String, val port: Int = 25565, val memoryMb: Int = 2048, val javaPath: String = System.getProperty("java.home") + "/bin/java", val loader:String="NeoForge",val minecraft:String="1.21.1")
 data class Event(val seq: Long, val time: String, val kind: String, val text: String)
 data class FileEntry(val name: String, val path: String, val directory: Boolean, val size: Long)
 data class MemoryCapacity(val totalMb: Long, val freeMb: Long, val reservedMb: Long, val maxHeapMb: Long, val committedHeapMb: Long, val startableHeapMb: Long)
 data class ServerSignal(val instanceId:String, val kind:String, val detail:String, val exit:ServerExit?=null, val error:DiscordErrorSummary?=null)
 interface RemoteController {
+    fun workspace(instance:Instance,request:WorkspaceRequest):com.fasterxml.jackson.databind.JsonNode {error("실행기를 업데이트하세요")}
+    fun supportsWorkspace(instance:Instance):Boolean=false
+    fun install(instance:Instance,requestId:String) {error("실행기를 업데이트하세요")}
     fun start(instance:Instance)
     fun stop(instance:Instance)
     fun restart(instance:Instance)
@@ -52,6 +55,7 @@ class RuntimeState {
     @Volatile var remotePid:Long? = null
     @Volatile var diagnosticActive=false
     @Volatile var diagnosticSession:String?=null
+    @Volatile var remoteFileBusy=false
     @Volatile var modBusy=false
     @Volatile var cloudSyncActive=false
     @Volatile var activityVersion=0L
@@ -161,7 +165,7 @@ class ServerManager {
     fun serverDir(id: String): Path = profileDir(id).resolve("server")
     fun originalServerDir(id:String):Path = root.resolve(id).resolve("server")
     fun reserveMods(id:String,diagnostic:Boolean=false) {val r=runtime(id);synchronized(r){
-        checkIdle(r,diagnostic);check(!r.cloudSyncActive) {"운영 클라우드 동기화가 끝난 뒤 검사하세요"};check(r.state in setOf("STOPPED","FAILED","NEW")) {"서버와 파일 인계를 먼저 완료하세요"}
+        check(instance(id).syncEnabled()) {"동기화 OFF에서는 중앙 복사본으로 모드 검사를 할 수 없습니다. 실행기 파일 관리자에서 수정하세요"};checkIdle(r,diagnostic);check(!r.cloudSyncActive) {"운영 클라우드 동기화가 끝난 뒤 검사하세요"};check(r.state in setOf("STOPPED","FAILED","NEW")) {"서버와 파일 인계를 먼저 완료하세요"}
         check(!root.resolve(id).resolve("remote-lease").exists() && !root.resolve(id).resolve("folder-import.pending").exists()) {"파일 인계가 진행 중입니다"}
         if(instance(id).runnerId!=null && r.lastExit!=null)check(r.remoteWorkerReady) {"실행기가 파일 인계를 확인하고 있습니다. 잠시 후 다시 시도하세요"}
         r.modBusy=true
@@ -179,6 +183,26 @@ class ServerManager {
         val tmp = file.resolveSibling("instance.json.tmp")
         tmp.writeText(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(i))
         Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    }
+    fun <T> withRemoteFiles(id:String,write:Boolean=true,action:()->T):T {
+        val r=runtime(id)
+        synchronized(r){if(write)checkIdle(r) else {check(!r.remoteFileBusy) {"다른 파일 요청을 처리 중입니다"};checkTransferReady(id)};r.remoteFileBusy=true}
+        try{return action()}finally{r.remoteFileBusy=false}
+    }
+    fun remoteWorkspace(id:String,request:WorkspaceRequest):com.fasterxml.jackson.databind.JsonNode {
+        val i=instance(id);check(!i.syncEnabled() && i.runnerId!=null) {"동기화 OFF 서버의 실행기 파일만 직접 접근할 수 있습니다"}
+        return (remoteController ?: error("실행기 연결이 없습니다")).workspace(i.copy(),request.copy(config=i.copy()))
+    }
+    @Synchronized fun setFileSync(id:String,enabled:Boolean):Map<String,Any?> {
+        val r=runtime(id);synchronized(r){
+            checkIdle(r);val i=instance(id);require(i.runnerId!=null) {"먼저 서버 실행기를 선택하세요"}
+            check(remoteController?.supportsWorkspace(i)==true) {"실행기를 0.4.5 이상으로 업데이트하고 연결하세요"}
+            if(enabled==i.syncEnabled())return view(id)
+            if(enabled){importRemoteFolder(id,true);return view(id)}
+            check(!root.resolve(id).resolve("remote-lease").exists() && !folderImportMarker(id).exists()) {"파일 인계를 완료한 뒤 동기화를 끄세요"}
+            instances[id]=i.copy(fileSyncEnabled=false);save(instance(id));r.fileTransfer=null;r.folderImport=null
+            r.event("system","파일 동기화 OFF · 현재 실행기의 원본 폴더만 사용합니다")
+        };return view(id)
     }
     fun list() = instances.values.sortedBy { it.name }.map { view(it.id) }
     @Synchronized fun <T> withIdle(action:()->T):T {
@@ -199,7 +223,7 @@ class ServerManager {
     }
     fun view(id: String): Map<String, Any?> {
         val i = instance(id); val r = runtime(id)
-        val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive,"modBusy" to r.modBusy) }
+        val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to (if(i.syncEnabled())serverDir(id).toString() else r.folderSource?.get("path") ?: "현재 실행기의 원본 서버 폴더"), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive,"modBusy" to (r.modBusy||r.remoteFileBusy)) }
         val transfer=synchronized(r) {mapOf("folderSource" to r.folderSource,"folderImport" to r.folderImport?.let(r.transferMeter::view),"fileTransfer" to r.fileTransfer?.let(r.transferMeter::view))}
         return result+transfer+mapOf("powerSaving" to powerStatus?.invoke(id),"autoRestart" to autoRestartStatus?.invoke(id))
     }
@@ -226,7 +250,7 @@ class ServerManager {
             require(req.loaderVersion == i.loaderVersion && req.loader==i.loader && req.minecraft==i.minecraft) { "설치된 로더 버전 변경은 새 인스턴스로 진행하세요" }
             require(remoteController?.sharedGamePort()!=null || instances.values.none { it.id != id && it.port == req.port }) { "다른 인스턴스가 사용하는 포트입니다" }
             i.name=req.name; i.port=req.port; i.memoryMb=req.memoryMb; i.javaPath=req.javaPath
-            writeProperties(i); save(i)
+            if(i.syncEnabled())writeProperties(i); save(i)
         }
         return view(id)
     }
@@ -235,6 +259,7 @@ class ServerManager {
         synchronized(r) {
             checkIdle(r)
             check(r.state in setOf("NEW","STOPPED","FAILED","IMPORT_FAILED")) { "서버가 완전히 종료된 뒤 실행기를 변경하세요" }
+            check(instance(id).syncEnabled() || instance(id).runnerId==runnerId) {"파일 동기화가 꺼져 있어 실행기를 변경할 수 없습니다. 먼저 동기화를 켜고 최신 파일 반영을 완료하세요"}
             instance(id).runnerId=runnerId
             r.folderSource=null;r.folderImport=null;r.fileTransfer=null
             save(instance(id))
@@ -277,7 +302,17 @@ class ServerManager {
     fun install(id: String) {
         val i=instance(id); val r=runtime(id)
         synchronized(r) {
-            checkIdle(r); require(r.state != "IMPORT_FAILED") { "실패한 팩은 원본 mrpack에서 다시 가져오세요" }; require(!root.resolve(id).resolve("installed.ok").exists()) { "이미 설치된 인스턴스입니다" }
+            checkIdle(r)
+            require(r.state != "IMPORT_FAILED") {"실패한 팩은 원본 mrpack에서 다시 가져오세요"};require(!root.resolve(id).resolve("installed.ok").exists()) {"이미 설치된 인스턴스입니다"}
+            if(i.runnerId!=null) {
+                check(remoteController?.supportsWorkspace(i)==true) {"선택한 실행기를 0.4.5 이상으로 업데이트하세요"}
+                val ticket=UUID.randomUUID().toString();atomicText(root.resolve(id).resolve("remote-install.pending"),ticket)
+                atomicText(root.resolve(id).resolve("remote-lease"),i.runnerId!!)
+                if(i.syncEnabled())atomicText(folderImportMarker(id),ticket)
+                r.fileTransfer=null;r.folderImport=null;r.transferAuthoritative=false;r.transferMeter.reset();r.state="INSTALLING";r.event("system","선택한 실행기에서 ${i.loader} 설치 중")
+                try {remoteController!!.install(i.copy(),ticket)}catch(e:Exception){root.resolve(id).resolve("remote-install.pending").deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists();folderImportMarker(id).deleteIfExists();r.state="FAILED";throw e};return
+            }
+            require(r.state != "IMPORT_FAILED") { "실패한 팩은 원본 mrpack에서 다시 가져오세요" }; require(!root.resolve(id).resolve("installed.ok").exists()) { "이미 설치된 인스턴스입니다" }
             r.state="INSTALLING"; r.event("system", "${i.loader} ${i.loaderVersion} 설치 준비 중")
         }
         workers.submit {
@@ -293,24 +328,33 @@ class ServerManager {
             } catch(e: Exception) { synchronized(r) { r.process=null; r.state="FAILED"; r.event("error", e.message ?: "설치 실패") } }
         }
     }
+    fun remoteInstallResult(id:String,runner:String,ticket:String,success:Boolean,detail:String?) {
+        val r=runtime(id);synchronized(r){val i=instance(id);if(i.runnerId!=runner || root.resolve(id).resolve("remote-install.pending").takeIf {it.exists()}?.readText()!=ticket)return
+            if(success && i.syncEnabled())return
+            root.resolve(id).resolve("remote-install.pending").deleteIfExists();folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists()
+            r.state=if(success)"STOPPED" else "FAILED";r.remotePid=null
+            if(success)root.resolve(id).resolve("installed.ok").writeText("runner-local")
+            r.event(if(success)"system" else "error",detail?.take(500) ?: "실행기 설치 결과");remoteController?.completed(i)
+        }
+    }
     fun checkTransferReady(id:String) {check(!runtime(id).modBusy) {"모드 작업이 진행 중입니다"};check(!runtime(id).recoveringFiles) {"중단된 파일 반영을 복구하고 있습니다. 완료 후 다시 시도하세요"}}
-    private fun checkIdle(r: RuntimeState,allowDiagnostic:Boolean=false) { check(!r.modBusy) {"모드 작업이 진행 중입니다"};check(!r.cloudSyncActive) {"클라우드 동기화가 진행 중입니다"};check(allowDiagnostic || !r.diagnosticActive) {"모드 검사 패널에서 먼저 검사를 일시 중단하거나 종료하세요"}; check(!r.recoveringFiles) {"파일 복구가 끝난 뒤 다시 시도하세요"};check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","RUNNING","STOPPING","IMPORTING","TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN")) { "서버가 실행 중이거나 작업 중입니다" } }
+    private fun checkIdle(r: RuntimeState,allowDiagnostic:Boolean=false) {check(!r.remoteFileBusy) {"실행기 파일 요청을 처리 중입니다"}; check(!r.modBusy) {"모드 작업이 진행 중입니다"};check(!r.cloudSyncActive) {"클라우드 동기화가 진행 중입니다"};check(allowDiagnostic || !r.diagnosticActive) {"모드 검사 패널에서 먼저 검사를 일시 중단하거나 종료하세요"}; check(!r.recoveringFiles) {"파일 복구가 끝난 뒤 다시 시도하세요"};check(r.state!="DELETED") { "삭제된 서버입니다" }; check(r.process?.isAlive != true && r.state !in listOf("INSTALLING","STARTING","RUNNING","STOPPING","IMPORTING","TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN")) { "서버가 실행 중이거나 작업 중입니다" } }
     private fun folderImportMarker(id:String)=root.resolve(id).resolve("folder-import.pending")
-    @Synchronized fun importRemoteFolder(id:String) {
+    @Synchronized fun importRemoteFolder(id:String,enableSync:Boolean=false) {
         val i=instance(id);val r=runtime(id)
         synchronized(r) {
-            checkIdle(r);val runner=i.runnerId ?: error("기존 폴더를 등록한 실행기를 선택하세요")
-            val previous=r.state;val request=UUID.randomUUID().toString()
+            checkIdle(r);check(i.syncEnabled() || enableSync) {"파일 동기화를 켜서 실행기 원본을 반영하세요"};val runner=i.runnerId ?: error("기존 폴더를 등록한 실행기를 선택하세요")
+            val previous=r.state;val request=UUID.randomUUID().toString();if(enableSync)atomicText(root.resolve(id).resolve("sync-enable.pending"),request)
             folderImportMarker(id).writeText(request);root.resolve(id).resolve("remote-lease").writeText(runner)
             r.state="IMPORTING";r.fileTransfer=null;r.transferAuthoritative=false;r.transferMeter.reset();r.folderImport=FolderImportProgress("SCANNING",message="실행기의 기존 폴더를 확인하고 있습니다")
             try {(remoteController ?: error("실행기 연결을 확인하세요")).importFolder(i.copy(),request)}
-            catch(e:Exception){folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists();r.state=previous;r.folderImport=FolderImportProgress("FAILED",message=e.message.orEmpty());throw e}
+            catch(e:Exception){folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists();root.resolve(id).resolve("sync-enable.pending").deleteIfExists();r.state=previous;r.folderImport=FolderImportProgress("FAILED",message=e.message.orEmpty());throw e}
             r.event("system","Minecraft를 실행하지 않고 기존 서버 폴더를 가져옵니다")
         }
     }
     fun checkFolderImport(id:String,runner:String,request:String) {
         val r=runtime(id)
-        synchronized(r) {check(!r.recoveringFiles && instance(id).runnerId==runner && r.state in setOf("IMPORTING","UNKNOWN") && r.remotePid==null && folderImportMarker(id).takeIf {it.exists()}?.readText()==request) { "기존 폴더 가져오기 요청이 만료됐거나 실행기가 변경됐습니다" }}
+        synchronized(r) {check(!r.recoveringFiles && instance(id).runnerId==runner && r.state in setOf("INSTALLING","IMPORTING","UNKNOWN") && r.remotePid==null && folderImportMarker(id).takeIf {it.exists()}?.readText()==request) { "기존 폴더 가져오기 요청이 만료됐거나 실행기가 변경됐습니다" }}
     }
     fun folderImportState(id:String,runner:String,request:String):String {
         require(instance(id).runnerId==runner)
@@ -489,7 +533,8 @@ class ServerManager {
     fun remoteWorkerReady(id:String,runnerId:String) {
         if(instance(id).runnerId!=runnerId)return
         val r=runtime(id)
-        synchronized(r) { if(r.state=="STOPPED") r.remoteWorkerReady=true }
+        if(!instance(id).syncEnabled() && r.state in setOf("SYNCING","UNKNOWN") && r.exitReport!=null && root.resolve(id).resolve("remote-lease").exists() && !folderImportMarker(id).exists())remoteCommitted(id,runnerId)
+        synchronized(r) { if(r.state=="STOPPED") {r.remoteWorkerReady=true;if(!instance(id).syncEnabled())r.remoteCloudReady=true} }
         resumeRemoteRestart(id)
     }
     fun remoteCloudReady(id:String) {
@@ -531,11 +576,14 @@ class ServerManager {
         if(importRequest!=null) {
             checkFolderImport(id,runnerId,importRequest)
             synchronized(r) {
+                val remoteInstall=root.resolve(id).resolve("remote-install.pending").takeIf {it.exists()}?.readText()==importRequest
                 root.resolve(id).resolve("folder-import.completed").writeText(importRequest)
                 folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists()
                 root.resolve(id).resolve("installed.ok").writeText("existing-folder")
-                r.state="STOPPED";r.folderImport=(r.folderImport ?: FolderImportProgress("COMPLETE")).copy(phase="COMPLETE",message="기존 폴더를 가져왔습니다. 파일 관리자에서 확인할 수 있습니다")
-                r.event("system","기존 서버 폴더 가져오기 완료 · 서버를 실행하지 않았습니다")
+                if(root.resolve(id).resolve("sync-enable.pending").takeIf {it.exists()}?.readText()==importRequest){instances[id]=i.copy(fileSyncEnabled=null);save(instance(id));root.resolve(id).resolve("sync-enable.pending").deleteIfExists()}
+                root.resolve(id).resolve("remote-install.pending").deleteIfExists()
+                r.state="STOPPED";r.folderImport=(r.folderImport ?: FolderImportProgress("COMPLETE")).copy(phase="COMPLETE",message=if(remoteInstall)"실행기에서 ${i.loader} 설치와 중앙 반영을 완료했습니다" else "기존 폴더를 가져왔습니다. 파일 관리자에서 확인할 수 있습니다")
+                r.event("system",if(remoteInstall)"실행기에서 ${i.loader} 설치 완료" else "기존 서버 폴더 가져오기 완료 · 서버를 실행하지 않았습니다")
             }
             signal(id,"import","기존 서버 파일 가져오기를 완료했습니다")
             return
@@ -548,7 +596,7 @@ class ServerManager {
             ServerExit(r.exitReport?.code,value,if(value)r.stopReason ?: "MANUAL" else "UNEXPECTED",r.exitReport?.crashReport).also {r.lastExit=it} to (if(r.exitErrorCaptured)r.exitError else r.discordError.recent())
         }
         remoteController?.completed(i)
-        signal(id,"stop",exit.summary()+" 변경 파일 인계를 완료했습니다.",exit,if(!exit.requested)summary else null)
+        signal(id,"stop",exit.summary()+if(i.syncEnabled())" 변경 파일 인계를 완료했습니다." else " 파일 동기화 OFF · 실행기 원본을 보존합니다.",exit,if(!exit.requested)summary else null)
     }
     fun events(id: String,after: Long): List<Event> { val r=runtime(id); return synchronized(r) { r.events.filter { it.seq>after }.take(2000) } }
     fun stopIfEmpty(id:String,activity:Long):Boolean {
@@ -594,7 +642,7 @@ class ServerManager {
         }
     }
     fun path(id: String, relative: String): Path {
-        instance(id);checkTransferReady(id);val base=serverDir(id).toRealPath(); val p=base.resolve(relative).normalize()
+        check(instance(id).syncEnabled()) {"동기화 OFF에서는 실행기 원본 파일을 사용하세요"};checkTransferReady(id);val base=serverDir(id).toRealPath(); val p=base.resolve(relative).normalize()
         require(p.startsWith(base)) { "인스턴스 외부 경로입니다" }
         var ancestor: Path?=p
         while(ancestor!=null && ancestor.startsWith(base)) { require(!Files.isSymbolicLink(ancestor)) { "심볼릭 링크는 지원하지 않습니다" }; ancestor=ancestor.parent }

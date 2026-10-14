@@ -22,8 +22,8 @@ data class RegistrationStart(val token:String?=null)
 data class RegistrationFinish(val credential:JsonNode,val label:String="패스키")
 data class LoginStart(val reauthenticate:Boolean=false)
 data class LoginFinish(val credential:JsonNode)
-data class InviteRequest(val name:String,val permissions:Map<String,String> = emptyMap())
-data class AccessRequest(val enabled:Boolean,val permissions:Map<String,String>)
+data class InviteRequest(val name:String,val permissions:Map<String,String> = emptyMap(),val role:AccountRole=AccountRole.MEMBER)
+data class AccessRequest(val enabled:Boolean,val permissions:Map<String,String>,val role:AccountRole?=null)
 private data class RegistrationCeremony(val request:String,val userId:String,val invitationHash:String?,val at:Long)
 private data class LoginCeremony(val request:String,val expectedUser:String?,val at:Long)
 
@@ -46,12 +46,12 @@ class AuthApi(private val store:AuthStore,private val settings:SecuritySettings,
         val session=req.getSession();session.maxInactiveInterval=30*60
         session.setAttribute("sm.user",user.id);session.setAttribute("sm.epoch",user.epoch);session.setAttribute("sm.started",System.currentTimeMillis());session.setAttribute("sm.verified",System.currentTimeMillis())
         val context=SecurityContextHolder.createEmptyContext()
-        context.authentication=UsernamePasswordAuthenticationToken.authenticated(user.id,null,listOf(SimpleGrantedAuthority(if(user.owner)"ROLE_OWNER" else "ROLE_MEMBER")))
+        context.authentication=UsernamePasswordAuthenticationToken.authenticated(user.id,null,listOf(SimpleGrantedAuthority(if(user.owner)"ROLE_OWNER" else if(user.role==AccountRole.ADMIN)"ROLE_ADMIN" else "ROLE_MEMBER")))
         SecurityContextHolder.setContext(context);contexts.saveContext(context,req,res);csrf.saveToken(null,req,res)
     }
     @GetMapping("/auth/session") fun session(req:HttpServletRequest):Map<String,Any?> {
         val user=current();val token=req.getAttribute(CsrfToken::class.java.name) as CsrfToken
-        return mapOf("appVersion" to javaClass.getResourceAsStream("/app-version.txt")!!.bufferedReader().use { it.readText().trim() },"user" to user?.let { mapOf("id" to it.id,"name" to it.displayName,"owner" to it.owner,"permissions" to it.permissions) },"csrf" to token.token,"publicOrigin" to settings.publicOrigin,"origin" to settings.origin,"setupRequired" to !store.hasOwnerCredential())
+        return mapOf("appVersion" to javaClass.getResourceAsStream("/app-version.txt")!!.bufferedReader().use { it.readText().trim() },"user" to user?.let { mapOf("id" to it.id,"name" to it.displayName,"owner" to it.owner,"administrator" to (it.role==AccountRole.ADMIN),"role" to it.role,"permissions" to it.instancePermissions()) },"csrf" to token.token,"publicOrigin" to settings.publicOrigin,"origin" to settings.origin,"setupRequired" to !store.hasOwnerCredential())
     }
     @PostMapping("/auth/register/options") fun registration(@RequestBody body:RegistrationStart,req:HttpServletRequest):JsonNode {
         val invitation=body.token?.let { store.invitation(it.trim()) ?: throw ResponseStatusException(HttpStatus.UNAUTHORIZED,"초대 코드가 잘못되었거나 만료되었습니다") }
@@ -100,11 +100,11 @@ class AuthApi(private val store:AuthStore,private val settings:SecuritySettings,
     @GetMapping("/auth/credentials") fun credentials()=store.credentialList(signedIn().id)
     @DeleteMapping("/auth/credentials/{id}") fun removeCredential(@PathVariable id:String,req:HttpServletRequest) { fresh(req);store.removeKey(signedIn().id,id) }
     @PostMapping("/auth/revoke-sessions") fun revoke(req:HttpServletRequest) { fresh(req);store.revokeSessions(signedIn().id) }
-    @GetMapping("/admin/users") fun users()=store.accounts().map { mapOf("id" to it.id,"name" to it.displayName,"owner" to it.owner,"enabled" to it.enabled,"permissions" to it.permissions,"registered" to store.credentialList(it.id).isNotEmpty()) }
+    @GetMapping("/admin/users") fun users()=store.accounts().map { mapOf("id" to it.id,"name" to it.displayName,"owner" to it.owner,"role" to it.role,"enabled" to it.enabled,"permissions" to it.instancePermissions(),"registered" to store.credentialList(it.id).isNotEmpty()) }
     @PostMapping("/admin/invitations") fun invite(@RequestBody body:InviteRequest,req:HttpServletRequest):Map<String,String> {
         fresh(req);body.permissions.keys.forEach { manager.instance(it) }
-        return mapOf("token" to store.invite(body.name,body.permissions),"expiresIn" to "24h")
+        return mapOf("token" to store.invite(body.name,body.permissions,body.role),"expiresIn" to "24h")
     }
-    @PutMapping("/admin/users/{id}") fun update(@PathVariable id:String,@RequestBody body:AccessRequest,req:HttpServletRequest) { fresh(req);body.permissions.keys.forEach { manager.instance(it) };store.updateUser(id,body.enabled,body.permissions) }
+    @PutMapping("/admin/users/{id}") fun update(@PathVariable id:String,@RequestBody body:AccessRequest,req:HttpServletRequest) { fresh(req);body.permissions.keys.forEach { manager.instance(it) };store.updateUser(id,body.enabled,body.permissions,body.role) }
     @GetMapping("/admin/audit") fun audit()=audit.recent()
 }

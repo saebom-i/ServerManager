@@ -76,16 +76,16 @@ class WebDavSync(private val manager:ServerManager,private val settings:WebDavSe
     private val successes=mutableMapOf<String,String>()
     private val errors=mutableMapOf<String,String>()
     private val subscription=manager.onSignal { signal -> if(signal.kind in setOf("stop","import")) {
-        if(!manager.runtime(signal.instanceId).diagnosticActive && settings.view().config.enabled) runCatching { schedule(signal.instanceId) }
+        if(manager.instance(signal.instanceId).syncEnabled() && !manager.runtime(signal.instanceId).diagnosticActive && settings.view().config.enabled) runCatching { schedule(signal.instanceId) }
         else manager.remoteCloudReady(signal.instanceId)
     } }
     private fun stateFile(id:String)=manager.root.resolve(id).resolve("webdav-sync.json")
     @Synchronized fun status(id:String):WebDavSyncStatus {
         manager.instance(id)
-        return WebDavSyncStatus(settings.view().config.enabled,id in running,successes[id],errors[id],readState(id))
+        return WebDavSyncStatus(settings.view().config.enabled && manager.instance(id).syncEnabled(),id in running,successes[id],errors[id],readState(id))
     }
     @Synchronized fun schedule(id:String) {
-        manager.instance(id)
+        check(manager.instance(id).syncEnabled()) {"서버 파일 동기화가 꺼져 있습니다"}
         require(settings.view().config.enabled) { "WebDAV 동기화가 꺼져 있습니다" }
         if(!running.add(id)) return
         executor.submit {
@@ -95,6 +95,7 @@ class WebDavSync(private val manager:ServerManager,private val settings:WebDavSe
         }
     }
     fun syncNow(id:String):CloudManifest {
+        check(manager.instance(id).syncEnabled()) {"서버 파일 동기화가 꺼져 있습니다"}
         val runtime=manager.runtime(id)
         val directory=synchronized(runtime) {
             check(!runtime.diagnosticActive && !runtime.modBusy && !runtime.cloudSyncActive) {"모드 검사·변경 중에는 운영 클라우드에 동기화하지 않습니다"}

@@ -1,5 +1,6 @@
 package local.servermanager
 
+import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.yubico.webauthn.CredentialRepository
@@ -17,7 +18,15 @@ import java.util.Optional
 import java.util.UUID
 import kotlin.io.path.*
 
-data class Account(val id:String, val displayName:String, val handle:String, val owner:Boolean=false, var enabled:Boolean=true, var epoch:Int=0, var permissions:Map<String,String> = emptyMap())
+enum class AccountRole { MEMBER, ADMIN, OWNER }
+private const val GLOBAL_ADMIN = "*"
+
+data class Account(val id:String, val displayName:String, val handle:String, val owner:Boolean=false, var enabled:Boolean=true, var epoch:Int=0, var permissions:Map<String,String> = emptyMap()) {
+    // Persist the global grant in the existing permission map so older releases can still read accounts.json.
+    @get:JsonIgnore val role:AccountRole get()=if(owner) AccountRole.OWNER else if(permissions[GLOBAL_ADMIN]=="ADMIN") AccountRole.ADMIN else AccountRole.MEMBER
+    fun managesAllServers()=role!=AccountRole.MEMBER
+    fun instancePermissions()=permissions.filterKeys { it!=GLOBAL_ADMIN }
+}
 data class Passkey(val id:String,val userId:String,val publicKey:String,var count:Long,val label:String,val createdAt:String)
 data class Invitation(val hash:String,val userId:String,val expiresAt:String,val recovery:Boolean=false)
 data class AuthData(val accounts:MutableList<Account> = mutableListOf(),val credentials:MutableList<Passkey> = mutableListOf(),val invitations:MutableList<Invitation> = mutableListOf())
@@ -68,10 +77,12 @@ class AuthStore(val directory:Path):CredentialRepository,AutoCloseable {
     @Synchronized fun credentialList(userId:String)=data.credentials.filter { it.userId==userId }.map { mapOf("id" to it.id,"label" to it.label,"createdAt" to it.createdAt) }
     @Synchronized fun hasOwnerCredential()=data.accounts.filter { it.owner }.any { a->data.credentials.any { it.userId==a.id } }
     @Synchronized fun invitation(value:String):Invitation? = data.invitations.find { it.hash==hash(value) && Instant.now().isBefore(Instant.parse(it.expiresAt)) && account(it.userId)?.enabled==true }
-    @Synchronized fun invite(name:String,permissions:Map<String,String>):String {
+    @Synchronized fun invite(name:String,permissions:Map<String,String>,role:AccountRole=AccountRole.MEMBER):String {
         require(name.isNotBlank() && name.length<=80)
         require(permissions.values.all { it in setOf("ADMIN","VIEWER") }) { "잘못된 권한" }
-        val user=Account(UUID.randomUUID().toString(),name,token(),permissions=permissions)
+        require(GLOBAL_ADMIN !in permissions) { "전체 관리자 권한은 계정 역할로 지정하세요" }
+        require(role!=AccountRole.OWNER) { "소유자는 등록된 계정의 역할 변경으로 지정하세요" }
+        val user=Account(UUID.randomUUID().toString(),name,token(),permissions=permissions + if(role==AccountRole.ADMIN) mapOf(GLOBAL_ADMIN to "ADMIN") else emptyMap())
         val value=token();data.accounts.add(user)
         data.invitations.add(Invitation(hash(value),user.id,Instant.now().plusSeconds(86400).toString()))
         persist();return value
@@ -87,11 +98,17 @@ class AuthStore(val directory:Path):CredentialRepository,AutoCloseable {
         if(user.owner)directory.resolve("setup-code.txt").deleteIfExists()
     }
     @Synchronized fun updateCounter(id:String,count:Long) { val key=data.credentials.find { it.id==id } ?: error("삭제된 패스키");key.count=count;persist() }
-    @Synchronized fun updateUser(id:String,enabled:Boolean,permissions:Map<String,String>) {
-        require(permissions.values.all { it in setOf("ADMIN","VIEWER") })
-        val account=data.accounts.find { it.id==id } ?: error("없는 계정")
-        require(!account.owner) { "소유자 계정은 여기에서 비활성화할 수 없습니다" }
-        account.enabled=enabled;account.permissions=permissions;account.epoch++;persist()
+    @Synchronized fun updateUser(id:String,enabled:Boolean,permissions:Map<String,String>,role:AccountRole?=null) {
+        require(permissions.values.all { it in setOf("ADMIN","VIEWER") } && GLOBAL_ADMIN !in permissions) { "잘못된 서버 권한" }
+        val index=data.accounts.indexOfFirst { it.id==id };require(index>=0) { "없는 계정" }
+        val account=data.accounts[index];val nextRole=role ?: account.role
+        require(nextRole!=AccountRole.OWNER || enabled) { "소유자 계정은 비활성화할 수 없습니다" }
+        if(account.owner && (!enabled || nextRole!=AccountRole.OWNER)) {
+            require(data.accounts.any { other -> other.id!=id && other.owner && other.enabled && data.credentials.any { it.userId==other.id } }) { "패스키가 등록된 마지막 소유자는 해제할 수 없습니다" }
+        }
+        require(nextRole!=AccountRole.OWNER || account.owner || data.credentials.any { it.userId==id }) { "패스키를 등록한 계정만 소유자로 지정할 수 있습니다" }
+        data.accounts[index]=account.copy(owner=nextRole==AccountRole.OWNER,enabled=enabled,permissions=permissions + if(nextRole==AccountRole.ADMIN) mapOf(GLOBAL_ADMIN to "ADMIN") else emptyMap(),epoch=account.epoch+1)
+        persist()
     }
     @Synchronized fun revokeSessions(id:String) { data.accounts.find { it.id==id }?.let { it.epoch++;persist() } }
     @Synchronized fun removeInstancePermissions(id:String) {
@@ -105,7 +122,7 @@ class AuthStore(val directory:Path):CredentialRepository,AutoCloseable {
     }
     fun allowed(userId:String,id:String,write:Boolean):Boolean {
         val user=account(userId) ?: return false
-        return user.enabled && (user.owner || user.permissions[id]=="ADMIN" || (!write && user.permissions[id]=="VIEWER"))
+        return user.enabled && (user.managesAllServers() || user.permissions[id]=="ADMIN" || (!write && user.permissions[id]=="VIEWER"))
     }
     @Synchronized override fun getCredentialIdsForUsername(username:String):Set<PublicKeyCredentialDescriptor> = data.credentials.filter { it.userId==username }.map { PublicKeyCredentialDescriptor.builder().id(WebBytes.fromBase64Url(it.id)).build() }.toSet()
     @Synchronized override fun getUserHandleForUsername(username:String):Optional<WebBytes> = Optional.ofNullable(account(username)?.takeIf { it.enabled }?.let { WebBytes.fromBase64Url(it.handle) })

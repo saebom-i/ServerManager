@@ -40,6 +40,10 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     private val mapper=jacksonObjectMapper()
     private val sessions=ConcurrentHashMap<String,WebSocketSession>()
     private val tokens=ConcurrentHashMap<String,String>()
+    private data class PendingWorkspace(val runner:String,val instance:String,val future:java.util.concurrent.CompletableFuture<com.fasterxml.jackson.databind.JsonNode>)
+    private val workspaceRequests=ConcurrentHashMap<String,PendingWorkspace>()
+    private val workspaceSlots=java.util.concurrent.Semaphore(32)
+
     private val sockets=ConcurrentHashMap<Int,GameStream>()
     private val listeners=ConcurrentHashMap<String,ServerSocket>()
     private val streams=AtomicInteger(1)
@@ -58,6 +62,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
             previous.close(CloseStatus.NORMAL)
         }
         session.binaryMessageSizeLimit=128*1024
+        session.textMessageSizeLimit=256*1024
         val token=ByteArray(32).also { SecureRandom().nextBytes(it) }.let { Base64.getUrlEncoder().withoutPadding().encodeToString(it) }
         tokens[id]=token
         registry.seen(id,registry.device(id)?.version ?: "unknown")
@@ -66,9 +71,15 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     override fun handleTextMessage(session:WebSocketSession,message:TextMessage) {
         val id=session.attributes["runnerId"] as? String ?: return
         if(sessions[id]!==session || registry.active(id)==null) { session.close(CloseStatus.POLICY_VIOLATION);return }
-        if(message.payload.length>16384) { session.close(CloseStatus.TOO_BIG_TO_PROCESS);return }
+        if(message.payload.length>256*1024) { session.close(CloseStatus.TOO_BIG_TO_PROCESS);return }
         val event=runCatching { mapper.readValue<RunnerMessage>(message.payload) }.getOrNull() ?: return
         when(event.type) {
+            "workspace-result" -> event.token?.let {key->workspaceRequests[key]?.takeIf {it.runner==id && it.instance==event.instanceId}?.let {pending->
+                if(event.state=="OK")runCatching {mapper.readTree(event.detail ?: "{}")}.onSuccess {pending.future.complete(it)}.onFailure {pending.future.completeExceptionally(it)}
+                else pending.future.completeExceptionally(IllegalStateException(event.detail?.take(500) ?: "실행기 파일 작업 실패"))
+            }}
+            "install-result" -> if(event.instanceId!=null && event.token!=null)manager.remoteInstallResult(event.instanceId,id,event.token,event.state=="OK",event.detail)
+
             "heartbeat" -> {
                 // Server-to-runner traffic also keeps reverse-proxy read timeouts alive
                 // during a long HTTP upload, when no control command is being sent.
@@ -114,6 +125,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         val id=session.attributes["runnerId"] as? String ?: return
         if(sessions.remove(id,session)) {
             tokens.remove(id);registry.disconnected(id);manager.remoteDisconnected(id)
+            workspaceRequests.values.filter {it.runner==id}.forEach {it.future.completeExceptionally(IllegalStateException("실행기가 연결 해제됐습니다. 파일을 다시 확인하세요"))}
             sockets.values.filter { it.runnerId==id }.forEach { closeStream(it,false) }
         }
     }
@@ -209,8 +221,25 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         check(connected(id)) { "실행기가 오프라인입니다" }
         return id
     }
+    override fun supportsWorkspace(instance:Instance):Boolean {
+        val id=instance.runnerId ?: return false
+        return connected(id) && runCatching {SignedUpdates.compare(registry.active(id)?.version ?: "unknown","0.4.5")>=0}.getOrDefault(false)
+    }
+    override fun workspace(instance:Instance,request:WorkspaceRequest):com.fasterxml.jackson.databind.JsonNode {
+        val id=requireRunner(instance);check(supportsWorkspace(instance)) {"실행기를 0.4.5 이상으로 업데이트하세요"}
+        check(workspaceSlots.tryAcquire()) {"파일 요청이 많습니다. 잠시 후 다시 시도하세요"}
+        val key=java.util.UUID.randomUUID().toString();val pending=PendingWorkspace(id,instance.id,java.util.concurrent.CompletableFuture());workspaceRequests[key]=pending
+        try {check(send(id,RunnerMessage("workspace",instanceId=instance.id,token=key,detail=mapper.writeValueAsString(request)))) {"실행기 연결을 확인하세요"};return pending.future.get(45,TimeUnit.SECONDS)}
+        catch(e:java.util.concurrent.TimeoutException){throw IllegalStateException("실행기 응답이 지연됐습니다. 작업 결과를 확인한 뒤 다시 시도하세요")}
+        catch(e:java.util.concurrent.ExecutionException){throw IllegalStateException(e.cause?.message ?: "실행기 파일 작업 실패")}
+        finally{workspaceRequests.remove(key);workspaceSlots.release()}
+    }
+    override fun install(instance:Instance,requestId:String) {
+        val id=requireRunner(instance);check(supportsWorkspace(instance));check(send(id,RunnerMessage("install",instanceId=instance.id,token=requestId,detail=mapper.writeValueAsString(instance))))
+    }
     override fun start(instance:Instance) {
         val id=requireRunner(instance)
+        check(instance.syncEnabled() || supportsWorkspace(instance)) {"파일 동기화 OFF에는 실행기 0.4.5 이상이 필요합니다"}
         if(instance.loader!="NeoForge" || instance.minecraft!="1.21.1") {
             val version=registry.active(id)?.version ?: "unknown"
             check(runCatching { SignedUpdates.compare(version,"0.4.0-beta.5")>=0 }.getOrDefault(false)) { "선택한 실행기를 beta.5 이상으로 업데이트한 뒤 이 런처를 시작하세요" }

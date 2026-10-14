@@ -33,6 +33,18 @@ class RunnerGatewayTest {
         assertEquals("heartbeat-ack",reply.type)
         verify(registry).seen("runner","0.4.0-beta.8")
     }
+    @Test fun `workspace responses require the current runner and instance and reads do not accept unrelated replies`() {
+        val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java);val instance=Instance("a","test",loaderVersion="21.1.249",port=25565,memoryMb=512,javaPath="java",runnerId="runner",fileSyncEnabled=false)
+        val device=RunnerDevice("runner","fixture","MAC","user","key","now",version="0.4.5",allowedInstanceIds=setOf("a"));`when`(registry.active("runner")).thenReturn(device);`when`(registry.online("runner")).thenReturn(true)
+        val mapper=jacksonObjectMapper();val session=mock(WebSocketSession::class.java);`when`(session.attributes).thenReturn(mutableMapOf<String,Any>("runnerId" to "runner"));`when`(session.isOpen).thenReturn(true)
+        val gateway=RunnerGateway(registry,manager)
+        doAnswer {args->val msg=args.arguments[0] as? TextMessage;if(msg!=null){val value=mapper.readValue<RunnerMessage>(msg.payload);if(value.type=="workspace"){
+            gateway.handleMessage(session,TextMessage(mapper.writeValueAsString(RunnerMessage("workspace-result","wrong","OK",token=value.token,detail="{\"size\":999}"))))
+            gateway.handleMessage(session,TextMessage(mapper.writeValueAsString(RunnerMessage("workspace-result","a","OK",token=value.token,detail="{\"size\":12}"))))
+        }};null}.`when`(session).sendMessage(any())
+        gateway.afterConnectionEstablished(session);assertEquals(12,gateway.workspace(instance,WorkspaceRequest("STAT",instance,"test.txt")).path("size").asInt())
+        `when`(registry.active("runner")).thenReturn(device.copy(allowedInstanceIds=emptySet()));assertFails {gateway.workspace(instance,WorkspaceRequest("STAT",instance,"test.txt"))}
+    }
     @Test fun `remote update commands use current signed session and reject legacy runners`() {
         val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java)
         val device=RunnerDevice("runner","fixture","MAC","user","key","now",version="0.4.4")

@@ -54,7 +54,7 @@ class DiscordAlerts {
 data class DiscordBotStatus(val state:String, val message:String, val inviteUrl:String?, val guilds:List<Map<String,String>>)
 
 @Service
-class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, private val desktop:DesktopLifecycle):ListenerAdapter() {
+class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, private val desktop:DesktopLifecycle,private val remoteFiles:RemoteFiles=RemoteFiles(manager)):ListenerAdapter() {
     private val settings=DiscordSettingsStore(manager.root.resolve("security/discord"))
     private val panels=DiscordPanelStore(manager.root.resolve("security/discord"))
     private val lifecycle=Executors.newSingleThreadExecutor()
@@ -238,7 +238,9 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
             val routes=view().config.alerts.filter { it.instanceId==signal.instanceId && it.accepts(signal) }
             if(routes.isEmpty())return@forEach
             val report=signal.exit?.crashReport
-            val reportBytes=report?.let {CrashReports.attachment(manager.serverDir(signal.instanceId),it)}
+            val reportBytes=report?.let {name->if(manager.instance(signal.instanceId).syncEnabled())CrashReports.attachment(manager.serverDir(signal.instanceId),name) else runCatching {
+                require(CrashReports.validName(name));val out=java.io.ByteArrayOutputStream();remoteFiles.download(signal.instanceId,"crash-reports/$name",out,CrashReports.MAX_BYTES.toLong());out.toByteArray().takeIf {it.isNotEmpty()}
+            }.getOrNull()}
             val reportSummary=reportBytes?.let {DiscordErrorBuffer.fromReport(it)}
             val summary=reportSummary ?: signal.error
             routes.forEach { route ->
