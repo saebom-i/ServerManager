@@ -19,3 +19,4 @@ tasks.register('probeJar', Jar) {
     archiveFileName = 'isolated-sable-probe.jar'
 }
 tasks.withType(Jar).configureEach { preserveFileTimestamps = false; reproducibleFileOrder = true }
+jar { from('LICENSE') }

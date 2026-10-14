@@ -50,6 +50,7 @@ class RuntimeState {
     @Volatile var players: PlayerSample? = null
     @Volatile var playerQueryInProgress = false
     @Volatile var queryPort:Int?=null
+    @Volatile var playerQueryMessage:String?=null
     @Volatile var remoteStopRequested = false
     @Volatile var remoteRestartRequested = false
     @Volatile var remoteWorkerReady = false
@@ -127,7 +128,7 @@ class ServerManager {
             if(r.playerQueryInProgress) return@forEach
             r.playerQueryInProgress=true
             workers.submit {
-                try { r.players=r.queryPort?.let(query::players) }
+                try { r.players=r.queryPort?.let(query::players);r.playerQueryMessage=if(r.players==null)"플레이어 조회 응답이 없습니다. 인원은 불명이며 무인 자동 종료를 보류합니다." else null }
                 finally { r.playerQueryInProgress=false }
             }
         }
@@ -227,7 +228,7 @@ class ServerManager {
         val i = instance(id); val r = runtime(id)
         val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to (if(i.syncEnabled())serverDir(id).toString() else r.folderSource?.get("path") ?: "현재 실행기의 원본 서버 폴더"), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive,"modBusy" to (r.modBusy||r.remoteFileBusy)) }
         val transfer=synchronized(r) {mapOf("folderSource" to r.folderSource,"folderImport" to r.folderImport?.let(r.transferMeter::view),"fileTransfer" to r.fileTransfer?.let(r.transferMeter::view))}
-        return result+transfer+mapOf("sableUdp" to remoteController?.sableStatus(i),"powerSaving" to powerStatus?.invoke(id),"autoRestart" to autoRestartStatus?.invoke(id))
+        return result+transfer+mapOf("playerQueryMessage" to r.playerQueryMessage?.takeIf {r.state=="RUNNING"},"sableUdp" to remoteController?.sableStatus(i),"powerSaving" to powerStatus?.invoke(id),"autoRestart" to autoRestartStatus?.invoke(id))
     }
     private fun validate(req: CreateRequest) {
         require(req.name.isNotBlank() && req.name.length <= 80) { "이름은 1~80자로 입력하세요" }
@@ -600,6 +601,7 @@ class ServerManager {
         remoteController?.completed(i)
         signal(id,"stop",exit.summary()+if(i.syncEnabled())" 변경 파일 인계를 완료했습니다." else " 파일 동기화 OFF · 실행기 원본을 보존합니다.",exit,if(!exit.requested)summary else null)
     }
+    fun remoteQueryStatus(id:String,runner:String,unknown:Boolean){val r=runtime(id);if(instance(id).runnerId==runner)r.playerQueryMessage=if(unknown)"실행기의 플레이어 조회 응답이 없습니다. 인원은 불명이며 무인 자동 종료를 보류합니다." else null}
     fun events(id: String,after: Long): List<Event> { val r=runtime(id); return synchronized(r) { r.events.filter { it.seq>after }.take(2000) } }
     fun stopIfEmpty(id:String,activity:Long):Boolean {
         val i=instance(id);val r=runtime(id)

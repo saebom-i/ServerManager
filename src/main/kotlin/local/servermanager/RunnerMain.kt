@@ -705,6 +705,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
         if(!process.isAlive)return
         val sample=metrics.sample(process.toHandle())
         val players=queryPorts[id]?.let(query::players)
+        send(RunnerMessage("query-status",id,state=if(id in ready && players==null)"UNKNOWN" else "KNOWN"))
         send(RunnerMessage("state",id,if(id in stopping)"STOPPING" else if(id in ready)"RUNNING" else "STARTING",version(),pid=process.pid(),cpuPercent=sample.cpuPercent,rssMb=sample.rssMb,
             uptimeSeconds=sample.uptimeSeconds,playerCount=players?.count,players=players?.names))
     }

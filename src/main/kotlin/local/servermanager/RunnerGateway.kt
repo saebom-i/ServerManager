@@ -96,6 +96,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
                     runCatching {sable.register(id,stream,instance,java.util.UUID.fromString(token))}.getOrDefault(false)
                 send(id,RunnerMessage("sable-registered",instanceId=instance,state=if(accepted)"OK" else "DENIED",streamId=stream,token=token))
             }
+            "query-status" -> event.instanceId?.let {instance->if(registry.active(id)?.allowedInstanceIds?.contains(instance)==true)manager.remoteQueryStatus(instance,id,event.state=="UNKNOWN")}
             "sable-status" -> event.instanceId?.let {instance->if(manager.instance(instance).runnerId==id && registry.active(id)?.allowedInstanceIds?.contains(instance)==true)sableStates[instance]=event.detail?.take(200) ?: "TCP_FALLBACK"}
 
             "workspace-result" -> event.token?.let {key->workspaceRequests[key]?.takeIf {it.runner==id && it.instance==event.instanceId}?.let {pending->
