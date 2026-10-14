@@ -32,7 +32,7 @@ tasks.processResources { inputs.file("VERSION"); doLast { destinationDir.resolve
 val sableBridgeBuild by tasks.registering(Exec::class) {
     inputs.files(fileTree("sable-bridge/src"),file("sable-bridge/build.gradle"),file("sable-bridge/settings.gradle"))
     outputs.files("sable-bridge/build/libs/servermanager-sable-bridge.jar","sable-bridge/build/libs/isolated-sable-probe.jar")
-    commandLine("./gradlew","-p","sable-bridge","jar","probeJar","--no-daemon")
+    commandLine((if(System.getProperty("os.name").startsWith("Windows")) listOf("cmd","/c","gradlew.bat") else listOf("./gradlew"))+listOf("-p","sable-bridge","jar","probeJar","--no-daemon"))
 }
 tasks.processResources {
     dependsOn(sableBridgeBuild)
