@@ -24,7 +24,7 @@ data class CreateRequest(val name: String, val loaderVersion: String, val port: 
 data class Event(val seq: Long, val time: String, val kind: String, val text: String)
 data class FileEntry(val name: String, val path: String, val directory: Boolean, val size: Long)
 data class MemoryCapacity(val totalMb: Long, val freeMb: Long, val reservedMb: Long, val maxHeapMb: Long, val committedHeapMb: Long, val startableHeapMb: Long)
-data class ServerSignal(val instanceId:String, val kind:String, val detail:String)
+data class ServerSignal(val instanceId:String, val kind:String, val detail:String, val exit:ServerExit?=null)
 interface RemoteController {
     fun start(instance:Instance)
     fun stop(instance:Instance)
@@ -58,6 +58,10 @@ class RuntimeState {
     var folderSource:Map<String,String>?=null
     var folderImport:FolderImportProgress?=null
     var fileTransfer:FolderImportProgress?=null
+    var startNotified=false
+    var lastExit:ServerExit?=null
+    var exitReport:RunnerExitReport?=null
+    var crashesBefore:Map<String,String> = emptyMap()
     fun event(kind: String, text: String) = synchronized(this) {
         events.addLast(Event(++seq, Instant.now().toString(), kind, text))
         while(events.size > 10000) events.removeFirst()
@@ -79,6 +83,8 @@ class ServerManager {
     private val query = MinecraftQuery()
     private val signalListeners = java.util.concurrent.CopyOnWriteArrayList<(ServerSignal)->Unit>()
     @Volatile private var remoteController:RemoteController?=null
+    @Volatile private var autoRestartStatus:((String)->AutoRestartStatus)?=null
+    fun attachAutoRestartStatus(provider:(String)->AutoRestartStatus){autoRestartStatus=provider}
     @Volatile private var powerStatus:((String)->PowerStatus)?=null
     fun attachPowerStatus(provider:(String)->PowerStatus){powerStatus=provider}
     private val joined=Regex("(?:logged in with entity id|joined the game)")
@@ -86,7 +92,9 @@ class ServerManager {
     fun setDiagnosticActive(id:String,active:Boolean){val r=runtime(id);synchronized(r){check(!active||!r.idleCheckPending){"무인 종료 직전 확인이 끝난 뒤 진단을 시작하세요"};r.diagnosticActive=active;r.activityVersion++}}
     fun attachRemoteController(controller:RemoteController) { remoteController=controller }
     fun onSignal(listener:(ServerSignal)->Unit):AutoCloseable { signalListeners.add(listener); return AutoCloseable { signalListeners.remove(listener) } }
-    private fun signal(id:String,kind:String,detail:String) { signalListeners.forEach { listener -> runCatching { listener(ServerSignal(id,kind,detail)) } } }
+    private fun signal(id:String,kind:String,detail:String,exit:ServerExit?=null) { signalListeners.forEach { listener -> runCatching { listener(ServerSignal(id,kind,detail,exit)) } } }
+    fun automaticRestartError(id:String,detail:String) {runtime(id).event("error",detail);signal(id,"error",detail)}
+    private fun started(id:String,r:RuntimeState) { if(!r.startNotified){r.startNotified=true;signal(id,"start","서버 시작을 완료했습니다. 이제 접속할 수 있습니다.")} }
     @Scheduled(fixedDelay = 2000) fun sampleResources() {
         val pids = mutableSetOf<Long>()
         runtimes.forEach { (id,r) ->
@@ -147,7 +155,7 @@ class ServerManager {
         val i = instance(id); val r = runtime(id)
         val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive) }
         val transfer=synchronized(r) {mapOf("folderSource" to r.folderSource,"folderImport" to r.folderImport,"fileTransfer" to r.fileTransfer)}
-        return result+transfer+mapOf("powerSaving" to powerStatus?.invoke(id))
+        return result+transfer+mapOf("powerSaving" to powerStatus?.invoke(id),"autoRestart" to autoRestartStatus?.invoke(id))
     }
     private fun validate(req: CreateRequest) {
         require(req.name.isNotBlank() && req.name.length <= 80) { "이름은 1~80자로 입력하세요" }
@@ -291,6 +299,7 @@ class ServerManager {
         synchronized(r) {
             checkIdle(r); require(r.state != "IMPORT_FAILED") { "실패한 팩은 시작할 수 없습니다. 원본 mrpack에서 다시 가져오세요" }; require(eulaAccepted(id)) { "Minecraft EULA에 먼저 동의하세요" }
             r.activityVersion++;r.stopReason=null;r.idleCheckPending=false;r.idleRequestId=null
+            r.startNotified=false;r.exitReport=null;r.lastExit=null;r.remoteCloudReady=false;r.remoteWorkerReady=false
             r.fileTransfer=null
             if(i.runnerId!=null) {
                 val controller=remoteController ?: error("원격 실행기 연결 기능을 사용할 수 없습니다")
@@ -308,12 +317,18 @@ class ServerManager {
             Launchers.verifyJava(i.javaPath,Launchers.requiredJava(i,serverDir(id)))
             ServerSocket(i.port,1,InetAddress.getByName("127.0.0.1")).use { }
             writeProperties(i)
+            r.crashesBefore=CrashReports.snapshot(serverDir(id))
             val p=ProcessBuilder(args).directory(serverDir(id).toFile()).redirectErrorStream(true).start()
             r.process=p; r.state="STARTING"; r.players=null; r.event("system","서버 시작 · 127.0.0.1:${i.port} · PID ${p.pid()}")
             workers.submit {
                 consume(id,p); val code=p.waitFor()
-                val requested=synchronized(r) { val stopped=r.state=="STOPPING"; if(r.process===p) { r.process=null; r.state=if(code==0) "STOPPED" else "FAILED" }; r.event("system","서버 종료 (exit $code)"); stopped }
-                signal(id,"stop",if(requested && r.stopReason=="IDLE")"무인 절전 요청 후 서버가 종료되었습니다 (exit $code)." else if(requested) "종료 요청 후 서버가 종료되었습니다 (exit $code)." else "예기치 않게 서버가 종료되었습니다 (exit $code).")
+                val exit=synchronized(r) {
+                    if(r.process!==p)return@submit
+                    val requested=r.state=="STOPPING"
+                    r.process=null;r.state=if(code==0)"STOPPED" else "FAILED"
+                    ServerExit(code,requested,if(requested)r.stopReason ?: "MANUAL" else "UNEXPECTED",CrashReports.changed(serverDir(id),r.crashesBefore)).also {r.lastExit=it;r.event("system",it.summary())}
+                }
+                signal(id,"stop",exit.summary(),exit)
             }
         }
     }
@@ -326,7 +341,7 @@ class ServerManager {
                 val line=raw.replace(Regex("\u001B\\[[0-?]*[ -/]*[@-~]"), "")
                 playerActivity(r,line)
                 val kind=when { line.contains("ERROR") || line.contains("Exception") -> "error"; line.contains("WARN") -> "warn"; else -> "output" }
-                synchronized(r) { if(r.state=="STARTING" && line.contains("Done (") && line.contains("For help")) r.state="RUNNING"; r.event(kind,line) }
+                synchronized(r) { if(r.state=="STARTING" && line.contains("Done (") && line.contains("For help")) {r.state="RUNNING";started(id,r)}; r.event(kind,line) }
                 if(kind=="error") signal(id,"error","서버 로그에서 오류가 감지되었습니다. 관리 웹의 콘솔에서 내용을 확인하세요.")
                 writer.appendLine(raw); writer.flush()
             } }
@@ -339,28 +354,28 @@ class ServerManager {
             val instance=instance(id)
             if(instance.runnerId!=null) {
                 val controller=remoteController ?: error("원격 실행기 연결 기능을 사용할 수 없습니다")
-                if(command.trim()=="stop") { controller.stop(instance);r.remoteStopRequested=true;r.state="STOPPING" }
+                if(command.trim()=="stop") { if(r.stopReason==null)r.stopReason="MANUAL";controller.stop(instance);r.remoteStopRequested=true;r.state="STOPPING" }
                 else controller.command(instance,command)
                 r.event("input",command)
                 return
             }
             val p=r.process ?: error("프로세스가 없습니다")
             p.outputStream.write((command+"\n").toByteArray()); p.outputStream.flush(); r.event("input",command)
-            if(command.trim()=="stop") r.state="STOPPING"
+            if(command.trim()=="stop") {if(r.stopReason==null)r.stopReason="MANUAL";r.state="STOPPING"}
         }
     }
     fun stop(id: String,force: Boolean) { val r=runtime(id); synchronized(r) {
         if(instance(id).runnerId!=null) { require(!force) { "원격 서버는 정상 종료를 사용하세요" };command(id,"stop");return }
-        if(force) { val p=r.process ?: error("프로세스가 없습니다"); r.state="STOPPING"; p.descendants().forEach { it.destroyForcibly() }; p.destroyForcibly(); r.event("system","강제 종료 요청") }
+        if(force) { r.stopReason="MANUAL";val p=r.process ?: error("프로세스가 없습니다"); r.state="STOPPING"; p.descendants().forEach { it.destroyForcibly() }; p.destroyForcibly(); r.event("system","강제 종료 요청") }
         else command(id,"stop")
     } }
     fun restart(id: String) {
         val r=runtime(id)
         if(instance(id).runnerId!=null) {
-            synchronized(r) { check(r.state=="RUNNING") { "실행 중인 서버만 재시작할 수 있습니다" };remoteController?.restart(instance(id)) ?: error("실행기 연결이 없습니다");r.remoteStopRequested=true;r.remoteRestartRequested=true;r.state="STOPPING";r.event("system","원격 서버 재시작 요청") }
+            synchronized(r) { check(r.state=="RUNNING") { "실행 중인 서버만 재시작할 수 있습니다" };r.stopReason="RESTART";remoteController?.restart(instance(id)) ?: error("실행기 연결이 없습니다");r.remoteStopRequested=true;r.remoteRestartRequested=true;r.state="STOPPING";r.event("system","원격 서버 재시작 요청") }
             return
         }
-        val old=synchronized(r) { check(r.state=="RUNNING") { "실행 중인 서버만 재시작할 수 있습니다" }; val p=r.process!!; command(id,"stop"); p }
+        val old=synchronized(r) { check(r.state=="RUNNING") { "실행 중인 서버만 재시작할 수 있습니다" }; val p=r.process!!;r.stopReason="RESTART"; command(id,"stop"); p }
         workers.submit {
             if(!old.waitFor(60,java.util.concurrent.TimeUnit.SECONDS)) { r.event("error","정상 종료가 지연되어 재시작을 취소했습니다. 상태를 확인하세요."); return@submit }
             synchronized(r) { if(r.process===old) { r.process=null; r.state="STOPPED" } }
@@ -374,7 +389,16 @@ class ServerManager {
             // HTTP commit and WebSocket status travel independently. A delayed status
             // must not resurrect a transfer whose lease has already been completed.
             if(state!="UNKNOWN" && !root.resolve(id).resolve("remote-lease").exists())return
-            r.state=state;if(state=="SYNCING"){r.remotePid=null;r.resources=null;r.players=null};if(state=="RUNNING"){r.fileTransfer=r.fileTransfer?.copy(phase="COMPLETE")};if(state=="SYNC_FAILED"){r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("FAILED")).copy(phase="FAILED",message=detail?.take(500) ?: "실행기 연결과 파일 인계 상태를 확인하세요")};detail?.take(1000)?.let { r.event("system",it) }
+            if(state=="SYNCING" && r.exitReport==null)r.exitReport=RunnerExitReport(Regex("종료 코드 (-?[0-9]+)").find(detail.orEmpty())?.groupValues?.get(1)?.toIntOrNull())
+            r.state=state;if(state=="RUNNING")started(id,r);if(state=="SYNCING"){r.remotePid=null;r.resources=null;r.players=null};if(state=="RUNNING"){r.fileTransfer=r.fileTransfer?.copy(phase="COMPLETE")};if(state=="SYNC_FAILED"){r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("FAILED")).copy(phase="FAILED",message=detail?.take(500) ?: "실행기 연결과 파일 인계 상태를 확인하세요")};detail?.take(1000)?.let { r.event("system",it) }
+        }
+    }
+    fun remoteExited(id:String,runnerId:String,report:RunnerExitReport) {
+        require(instance(id).runnerId==runnerId)
+        require(report.crashReport==null || CrashReports.validName(report.crashReport))
+        val r=runtime(id);synchronized(r) {
+            check(root.resolve(id).resolve("remote-lease").exists() && !folderImportMarker(id).exists()) {"실행 중이던 서버의 종료만 보고할 수 있습니다"}
+            r.exitReport=report
         }
     }
     fun remoteStartFailed(id:String,runnerId:String,detail:String?) {
@@ -396,7 +420,7 @@ class ServerManager {
     }
     fun remoteCloudReady(id:String) {
         val r=runtime(id)
-        synchronized(r) { if(r.state=="STOPPED") r.remoteCloudReady=true }
+        synchronized(r) { if(r.state in setOf("STOPPED","FAILED")) r.remoteCloudReady=true }
         resumeRemoteRestart(id)
     }
     private fun resumeRemoteRestart(id:String) {
@@ -442,14 +466,15 @@ class ServerManager {
             signal(id,"import","기존 서버 파일 가져오기를 완료했습니다")
             return
         }
-        val requested=synchronized(r) {
+        val exit=synchronized(r) {
             root.resolve(id).resolve("remote-lease").deleteIfExists()
             val value=r.remoteStopRequested;r.remoteStopRequested=false;r.remoteWorkerReady=false;r.remoteCloudReady=false;r.state="STOPPED";r.players=null;r.resources=null;r.remotePid=null
             r.fileTransfer=(r.fileTransfer ?: FolderImportProgress("COMPLETE")).copy(phase="COMPLETE",message="서버 파일 인계를 완료했습니다")
-            r.event("system","원격 서버 파일 인계를 완료했습니다");value
+            r.event("system","원격 서버 파일 인계를 완료했습니다")
+            ServerExit(r.exitReport?.code,value,if(value)r.stopReason ?: "MANUAL" else "UNEXPECTED",r.exitReport?.crashReport).also {r.lastExit=it}
         }
         remoteController?.completed(i)
-        signal(id,"stop",if(requested && r.stopReason=="IDLE")"무인 절전 요청 후 서버 종료와 데이터 인계를 완료했습니다." else if(requested) "종료 요청 후 서버 데이터 인계까지 완료되었습니다." else "서버가 종료되어 데이터 인계를 완료했습니다.")
+        signal(id,"stop",exit.summary()+" 변경 파일 인계를 완료했습니다.",exit)
     }
     fun events(id: String,after: Long): List<Event> { val r=runtime(id); return synchronized(r) { r.events.filter { it.seq>after }.take(2000) } }
     fun stopIfEmpty(id:String,activity:Long):Boolean {
@@ -523,7 +548,7 @@ class ServerManager {
     fun move(id: String,from: String,to: String) { val r=runtime(id); synchronized(r) { checkIdle(r); val source=path(id,from); val target=path(id,to); require(source!=serverDir(id) && !target.exists()) { "대상 경로를 확인하세요" }; Files.move(source,target) } }
     fun delete(id: String,relative: String) { val r=runtime(id); synchronized(r) { checkIdle(r); val p=path(id,relative); require(p!=serverDir(id)) { "서버 루트는 삭제할 수 없습니다" }; val trash=root.resolve(id).resolve("trash"); trash.createDirectories(); Files.move(p,trash.resolve(UUID.randomUUID().toString()+"-"+p.name)) } }
     @PreDestroy fun shutdown() {
-        val processes=runtimes.values.mapNotNull { r -> synchronized(r) { r.process } }.filter { it.isAlive }
+        val processes=runtimes.values.mapNotNull { r -> synchronized(r) { r.process?.also {r.stopReason="SHUTDOWN";r.state="STOPPING"} } }.filter { it.isAlive }
         processes.forEach { p ->
             runCatching { p.outputStream.write("stop\n".toByteArray()); p.outputStream.flush() }
         }

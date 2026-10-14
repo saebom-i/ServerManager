@@ -9,7 +9,7 @@ import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.attribute.PosixFilePermissions
 import kotlin.io.path.*
 
-data class DiscordPanelRecord(val panelId:String?=null, val errorIds:List<String> = emptyList(), val stopId:String?=null)
+data class DiscordPanelRecord(val panelId:String?=null, val errorIds:List<String> = emptyList(), val stopId:String?=null, val startId:String?=null)
 
 /** Stores only Discord message IDs. No log text or parsed server output is persisted. */
 class DiscordPanelStore(private val directory:Path) {

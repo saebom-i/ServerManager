@@ -15,7 +15,9 @@ import javax.crypto.spec.SecretKeySpec
 import kotlin.io.path.*
 
 data class DiscordGrant(val guildId:String, val roleId:String, val instanceId:String, val canStart:Boolean = false, val canStop:Boolean = false, val canRestart:Boolean = false)
-data class DiscordAlertRoute(val guildId:String, val channelId:String, val instanceId:String, val errors:Boolean = true, val stops:Boolean = true, val panel:Boolean = false)
+data class DiscordAlertRoute(val guildId:String, val channelId:String, val instanceId:String, val errors:Boolean = true, val stops:Boolean = true, val panel:Boolean = false, val starts:Boolean = true) {
+    fun accepts(kind:String)=when(kind) {"error"->errors;"stop"->stops;"start"->starts;else->false}
+}
 data class DiscordSuperAdmin(val guildId:String, val roleId:String)
 data class DiscordConfig(val enabled:Boolean = false, val grants:List<DiscordGrant> = emptyList(), val alerts:List<DiscordAlertRoute> = emptyList(), val superAdmins:List<DiscordSuperAdmin> = emptyList())
 // Secret-bearing objects deliberately have no generated toString and are never API responses.

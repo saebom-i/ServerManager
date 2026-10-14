@@ -37,13 +37,13 @@ import kotlin.concurrent.read
 
 /** Bounded aggregation: no raw log lines, network work or unbounded queue on the process reader. */
 class DiscordAlerts {
-    private data class Pending(var count:Int, var detail:String)
+    private data class Pending(var count:Int, var signal:ServerSignal)
     private val pending=linkedMapOf<Pair<String,String>,Pending>()
     private val last=mutableMapOf<Pair<String,String>,Long>()
-    @Synchronized fun offer(signal:ServerSignal) {
-        val key=signal.instanceId to signal.kind
+    @Synchronized fun offer(event:ServerSignal) {
+        val key=event.instanceId to event.kind
         if(key !in pending && pending.size>=1000) return
-        pending.getOrPut(key) { Pending(0,signal.detail) }.apply { count=(count+1).coerceAtMost(1000000); detail=signal.detail }
+        pending.getOrPut(key) { Pending(0,event) }.apply { count=(count+1).coerceAtMost(1000000); signal=event }
     }
     @Synchronized fun drain(now:Long):List<Pair<ServerSignal,Int>> {
         last.entries.removeIf { now-it.value>120000 }
@@ -52,7 +52,7 @@ class DiscordAlerts {
         while(iterator.hasNext()) {
             val (key,p)=iterator.next()
             if(key.second=="error" && now-(last[key] ?: Long.MIN_VALUE/2)<60000) continue
-            result.add(ServerSignal(key.first,key.second,p.detail) to p.count);last[key]=now;iterator.remove()
+            result.add(p.signal to p.count);last[key]=now;iterator.remove()
         }
         return result
     }
@@ -91,7 +91,7 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
         val jda=client
         val state=when { !view().config.enabled->"OFF"; jda!=null->jda.status.name; connecting->"CONNECTING"; else->"ERROR" }
         val ready=jda?.status==JDA.Status.CONNECTED
-        val invite=if(ready) "https://discord.com/oauth2/authorize?client_id=${jda!!.selfUser.id}&scope=bot%20applications.commands&permissions=93184" else null
+        val invite=if(ready) "https://discord.com/oauth2/authorize?client_id=${jda!!.selfUser.id}&scope=bot%20applications.commands&permissions=125952" else null
         return DiscordBotStatus(state,message,invite,if(ready) jda!!.guilds.map { mapOf("id" to it.id,"name" to it.name) } else emptyList())
     }
     @Synchronized fun save(request:DiscordSave):DiscordSettingsView {
@@ -243,29 +243,41 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
         if(jda==null || jda.status!=JDA.Status.CONNECTED || !view().config.enabled) { alerts.clear();return }
         alerts.drain(System.currentTimeMillis()).forEach { (signal,count) ->
             val name=runCatching { manager.instance(signal.instanceId).name }.getOrNull() ?: return@forEach
-            view().config.alerts.filter { it.instanceId==signal.instanceId && (if(signal.kind=="error") it.errors else it.stops) }
+            view().config.alerts.filter { it.instanceId==signal.instanceId && it.accepts(signal.kind) }
                 .forEach { route ->
                     // Channel lookup is scoped to the configured guild, never a globally supplied channel ID.
                     val channel=jda.getGuildById(route.guildId)?.getTextChannelById(route.channelId)
                     if(channel==null) { message="알림 채널을 찾을 수 없습니다. 서버·텍스트 채널 ID와 봇 권한을 확인하세요.";return@forEach }
                     val key=DiscordPanelStore.key(route)
+                    if(signal.kind=="start") {
+                        listOfNotNull(panels.get(key).stopId,panels.get(key).startId).forEach {channel.deleteMessageById(it).queue({}, {})}
+                        panels.change(key) {it.copy(stopId=null,startId=null)}
+                    }
                     if(signal.kind=="stop" && route.panel) {
-                        val old=panels.get(key).errorIds
+                        val old=panels.get(key).errorIds+listOfNotNull(panels.get(key).startId)
                         old.forEach { channel.deleteMessageById(it).queue({}, {}) }
-                        panels.change(key) { it.copy(errorIds=emptyList()) }
+                        panels.change(key) { it.copy(errorIds=emptyList(),startId=null) }
                         errorTimes.remove(signal.instanceId)
                     }
-                    val title=if(signal.kind=="error") "⚠️ 오류 감지" else if(signal.detail.contains("예기치")) "🛑 비정상 종료" else "⏹ 서버 종료"
+                    val title=if(signal.kind=="start") "🟢 서버 시작 완료" else if(signal.kind=="error") "⚠️ 오류 감지" else if(signal.exit?.requested==false||signal.detail.contains("예기치")) "🛑 비정상 종료" else "⏹ 서버 종료"
+                    val report=signal.exit?.crashReport
+                    val canAttach=channel.guild.selfMember.hasPermission(channel,net.dv8tion.jda.api.Permission.MESSAGE_ATTACH_FILES)
+                    val attachment=report?.takeIf {canAttach}?.let {CrashReports.attachment(manager.serverDir(signal.instanceId),it)}
+                    val restart=(manager.view(signal.instanceId)["autoRestart"] as? AutoRestartStatus)?.takeIf {signal.kind=="stop"&&it.config.enabled}
+                    val restartText=restart?.let {if(it.remainingSeconds!=null)"\n자동 재시작 대기: 파일·클라우드 인계 완료 후 ${it.remainingSeconds}초 이내 (최대 3회/10분)." else if(it.message!=null)"\n${it.message}" else ""}.orEmpty()
+                    val reportText=if(report!=null&&!canAttach)"\n크래시 리포트를 보내려면 봇에 파일 첨부 권한을 허용하세요. 관리 웹의 로그 파일에서도 확인할 수 있습니다." else if(report!=null&&attachment==null)"\n크래시 리포트가 8 MiB를 넘거나 읽을 수 없어 첨부하지 못했습니다. 관리 웹의 로그 파일에서 확인하세요." else ""
                     val embed=EmbedBuilder().setTitle("$title · ${name.take(80)}")
-                        .setDescription((signal.detail+if(count>1) "\n같은 종류의 알림 ${count}건을 묶었습니다." else "").take(1000))
-                        .setColor(if(signal.kind=="error" || signal.detail.contains("예기치")) Color(0xd85c55) else Color(0x5f8bb5))
+                        .setDescription((signal.detail+restartText+reportText+(if(count>1) "\n같은 종류의 알림 ${count}건을 묶었습니다." else "")).take(1500))
+                        .setColor(if(signal.kind=="start") Color(0x4caf83) else if(signal.kind=="error" || signal.exit?.requested==false || signal.detail.contains("예기치")) Color(0xd85c55) else Color(0x5f8bb5))
                         .setTimestamp(Instant.now()).build()
-                    channel.sendMessageEmbeds(embed).queue({ sent ->
+                    val action=channel.sendMessageEmbeds(embed).setAllowedMentions(emptyList())
+                    if(attachment!=null)action.addFiles(net.dv8tion.jda.api.utils.FileUpload.fromData(attachment,report!!))
+                    action.queue({ sent ->
                         if(route.panel) {
                             if(signal.kind=="error") {
                                 val next=panels.change(key) { it.copy(errorIds=(it.errorIds+sent.id).takeLast(30)) }
                                 if(next.errorIds.size>=30) cleanChannel(channel,key)
-                            } else panels.change(key) { it.copy(stopId=sent.id) }
+                            } else if(signal.kind=="start") panels.change(key) {it.copy(startId=sent.id)} else panels.change(key) { it.copy(stopId=sent.id) }
                         }
                     }, { if(jda===client) message="알림 전송 실패: 채널 보기·메시지 보내기·링크 임베드 권한을 확인하세요." })
                 }
@@ -342,7 +354,7 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
     private fun cleanChannel(channel:TextChannel,key:String) {
         val record=panels.get(key)
         if(record.panelId==null) return
-        val keep=(record.errorIds+listOfNotNull(record.panelId,record.stopId)).toSet()
+        val keep=(record.errorIds+listOfNotNull(record.panelId,record.stopId,record.startId)).toSet()
         channel.history.retrievePast(100).queue({ rows ->
             rows.filter { it.id !in keep }.forEach { it.delete().queue({}, { if(client!=null) message="전용 채널 정리 실패: 메시지 관리 권한을 확인하세요." }) }
         }, { if(client!=null) message="전용 채널을 읽지 못했습니다. 메시지 기록 보기 권한을 확인하세요." })

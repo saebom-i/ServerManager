@@ -9,8 +9,8 @@ type LogFile={path:string;name:string;size:number;compressed:boolean};
 const PAGE=300,ROW=28;
 const Command=memo(function Command({id,enabled,hint}:{id:string;enabled:boolean;hint:string}){
  const [value,setValue]=useState(''),[pending,setPending]=useState(false),[error,setError]=useState('');const lock=useRef(false);
- async function submit(e:React.FormEvent){e.preventDefault();if(!enabled||lock.current||!value.trim())return;lock.current=true;setPending(true);setError('');const sent=value;setValue('');try{await api(`/instances/${id}/command`,'POST',{command:sent});}catch(e){setError((e as Error).message);setValue(sent);}finally{lock.current=false;setPending(false);}}
- return <>{error&&<div role="alert" className="error-banner alert">{error}</div>}{!enabled&&<div className="console-state">{hint}</div>}<form className={'command-bar '+(!enabled?'command-disabled':'')} onSubmit={submit}><span>❯</span><input aria-label="콘솔 명령" disabled={!enabled||pending} placeholder={enabled?'서버 명령을 입력하세요. 예: list, say 안녕하세요':hint} value={value} onChange={e=>setValue(e.target.value)}/><button disabled={!enabled||pending||!value.trim()}>명령 보내기 ↵</button></form></>;
+ async function submit(e:React.FormEvent){e.preventDefault();if(!enabled||lock.current||!value.trim())return;const text=value.trim(),command=text.startsWith('/')?text.slice(1).trim():`say ${text}`;if(!command){setError('/ 뒤에 실행할 명령을 입력하세요.');return;}if(/[\r\n]/.test(command)||command.length>4096){setError('4096자 이내의 한 줄을 입력하세요.');return;}lock.current=true;setPending(true);setError('');const sent=value;setValue('');try{await api(`/instances/${id}/command`,'POST',{command});}catch(e){setError((e as Error).message);setValue(sent);}finally{lock.current=false;setPending(false);}}
+ return <>{error&&<div role="alert" className="error-banner alert">{error}</div>}{!enabled&&<div className="console-state">{hint}</div>}<form className={'command-bar '+(!enabled?'command-disabled':'')} onSubmit={submit}><span>❯</span><input aria-label="콘솔 명령" disabled={!enabled||pending} placeholder={enabled?'채팅을 입력하세요 · 명령은 /list, /stop처럼 입력':hint} value={value} onChange={e=>setValue(e.target.value)}/><button disabled={!enabled||pending||!value.trim()}>보내기 ↵</button></form></>;
 });
 const clock=new Intl.DateTimeFormat('en-GB',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
 const LogRow=memo(function LogRow({event:e,top,onOpen}:{event:ParsedLog;top:number;onOpen:(event:ParsedLog)=>void}){
@@ -63,7 +63,7 @@ function ConsoleView({id,enabled,hint,source}:{id:string;enabled:boolean;hint:st
  <div className="log-viewport-shell">{loading&&<div className="log-loading" role="status" aria-live="polite"><span className="log-spinner"/>{progress||'로그 파싱 중…'}<small>긴 로그도 페이지 단위로 처리합니다.</small></div>}
  <div className="logs virtual-logs" aria-busy={pending||loading} ref={viewport} data-testid="log-viewport" onScroll={e=>{const v=e.currentTarget;setTop(v.scrollTop);if(v.scrollHeight-v.scrollTop-v.clientHeight>ROW*2)setFollow(false);}}>{!events.length?<div className="console-empty"><Terminal size={28}/><p>{pending?'로그를 준비하고 있습니다.':'표시할 로그가 없습니다.'}</p></div>:<div style={{height:rows.length*ROW,position:'relative'}}>{rows.slice(start,end).map((event,offset)=><LogRow key={event.seq} event={event} top={(start+offset)*ROW} onOpen={openDetail}/>)}</div>}</div>
  </div>
- {!source&&<Command key={id} id={id} enabled={enabled} hint={hint}/>}<div className="panel-foot">{source?'저장된 원문 로그를 조회하고 있습니다. 변경된 파일은 다시 불러오세요.':'명령은 서버 표준 입력으로 전달됩니다.'}<span>파싱 결과는 디스크에 저장하지 않습니다.</span></div>
+ {!source&&<Command key={id} id={id} enabled={enabled} hint={hint}/>}<div className="panel-foot">{source?'저장된 원문 로그를 조회하고 있습니다. 변경된 파일은 다시 불러오세요.':'일반 입력은 서버 채팅으로 전송 · /로 시작하면 명령 실행'}<span>파싱 결과는 디스크에 저장하지 않습니다.</span></div>
  {detail&&<LogDetail event={detail} onClose={()=>setDetail(null)}/>}
  </section>;
 }

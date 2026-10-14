@@ -420,6 +420,8 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         properties.outputStream().use { values.store(it,"Server Manager Runner") }
         ready.remove(id)
         activity[id]=AtomicLong()
+        val crashesBefore=CrashReports.snapshot(serverDir(id))
+        instanceRoot(id).resolve("exit.json").deleteIfExists()
         val process=ProcessBuilder(args)
             .directory(serverDir(id).toFile()).redirectErrorStream(true).start()
         onSpawned()
@@ -440,6 +442,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                 }
             } } }
             val code=process.waitFor()
+            atomicText(instanceRoot(id).resolve("exit.json"),mapper.writeValueAsString(RunnerExitReport(code,CrashReports.changed(serverDir(id),crashesBefore))))
             ready.remove(id)
             stopping.remove(id)
             processes.remove(id,process)
@@ -450,6 +453,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
     private fun uploadStopped(id:String) {
         if(!dirty(id).exists() || processes[id]?.isAlive==true || orphanAlive(id) || sessionToken==null || !uploading.add(id))return
         try {
+            // A separate authenticated request arrives before commit, independent of WSS ordering.
+            instanceRoot(id).resolve("exit.json").takeIf {it.exists()}?.let {exit->
+                val response=http("POST","/api/runners/transfer/$id/exit",HttpRequest.BodyPublishers.ofString(exit.readText()),"application/json")
+                check(response.statusCode() in setOf(200,404)) {"서버 종료 정보 전달 실패: HTTP ${response.statusCode()}"}
+            }
             uploadFiles(id,null)
             dirty(id).deleteIfExists()
             send(RunnerMessage("state",id,"STOPPED",version(),"서버 파일 인계 완료"))

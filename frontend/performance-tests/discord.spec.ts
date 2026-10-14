@@ -18,7 +18,7 @@ test('Discord drafts survive status polling and save role routes without returni
   await route.fulfill({json:result});
  });
  await page.goto('/');await page.getByRole('button',{name:'계정과 보안',exact:true}).click();
- const panel=page.getByRole('region',{name:'Discord 봇 · BETA'});
+ const panel=page.getByRole('region',{name:'Discord 봇'});
  await panel.getByLabel('봇 토큰',{exact:true}).fill('fake_secret_for_ui_test_1234567890');
  await panel.getByLabel('Discord 연동 켜기').check();await panel.getByRole('button',{name:'역할 규칙 추가'}).click();
  await panel.getByLabel('Discord 서버 ID',{exact:true}).fill('123456789012345678');await panel.getByLabel('역할 ID',{exact:true}).fill('223456789012345678');await panel.getByLabel('서버 시작 허용').check();
@@ -26,7 +26,7 @@ test('Discord drafts survive status polling and save role routes without returni
  await page.waitForTimeout(5300);
  await expect(panel.getByLabel('봇 토큰',{exact:true})).toHaveValue('fake_secret_for_ui_test_1234567890');
  await panel.getByRole('button',{name:'Discord 설정 저장'}).click();await expect(panel.getByText('Discord 설정을 저장했습니다.',{exact:false})).toBeVisible();
- expect(payload.config.grants[0]).toEqual({guildId:'123456789012345678',roleId:'223456789012345678',instanceId:'a',canStart:true,canStop:false,canRestart:false});expect(payload.config.alerts[0].channelId).toBe('323456789012345678');expect(payload.config.alerts[0].panel).toBe(true);
+ expect(payload.config.grants[0]).toEqual({guildId:'123456789012345678',roleId:'223456789012345678',instanceId:'a',canStart:true,canStop:false,canRestart:false});expect(payload.config.alerts[0].channelId).toBe('323456789012345678');expect(payload.config.alerts[0].panel).toBe(true);expect(payload.config.alerts[0].starts).toBe(true);
  await expect(panel.getByLabel('봇 토큰',{exact:true})).toHaveValue('');await expect(panel.getByLabel('봇 토큰',{exact:true})).toHaveAttribute('type','password');
  await panel.getByRole('button',{name:'저장된 토큰 삭제 예약'}).click();await expect(panel.getByLabel('Discord 연동 켜기')).not.toBeChecked();await panel.getByRole('button',{name:'Discord 설정 저장'}).click();await expect.poll(()=>saved.tokenConfigured).toBe(false);expect(payload.clearToken).toBe(true);expect(errors).toEqual([]);
 });

@@ -123,6 +123,10 @@ class RunnerTransferApi(private val transfer:RunnerTransfer,private val gateway:
         if(!gateway.authorized(runnerId,token) || manager.instance(instanceId).runnerId!=runnerId)
             throw ResponseStatusException(HttpStatus.FORBIDDEN,"실행기 연결 또는 서버 배정을 확인하세요")
     }
+    @PostMapping("/{instanceId}/exit") fun exited(@PathVariable instanceId:String,@RequestBody report:RunnerExitReport,
+        @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):Map<String,Boolean> {
+        check(runnerId,token,instanceId);manager.remoteExited(instanceId,runnerId,report);return mapOf("ok" to true)
+    }
     @GetMapping("/{instanceId}/import-state") fun importState(@PathVariable instanceId:String,@RequestParam request:String,
         @RequestHeader("X-SM-Runner-Id") runnerId:String,@RequestHeader("X-SM-Session",required=false) token:String?):Map<String,String> {
         check(runnerId,token,instanceId);return mapOf("state" to manager.folderImportState(instanceId,runnerId,request))
