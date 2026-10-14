@@ -11,6 +11,12 @@ import kotlin.test.*
 
 class GameNetworkTest {
     @TempDir lateinit var temp:Path
+    @Test fun `disabled UDP setting keeps legacy persisted config shape`() {
+        val mapper=jacksonObjectMapper();val legacy=mapper.readTree(mapper.writeValueAsString(GameNetworkConfig()))
+        assertFalse(legacy.has("sableUdpEnabled"))
+        assertTrue(mapper.readTree(mapper.writeValueAsString(GameNetworkConfig(enabled=true,sableUdpEnabled=true))).path("sableUdpEnabled").asBoolean())
+        assertFails {GameDomains.validate(GameNetworkConfig(sableUdpEnabled=true),emptySet())}
+    }
     private fun config()=GameNetworkConfig(enabled=true,baseDomain="server.example.com",targetHost="gateway.example.com",defaultInstanceId="a",defaultHostname="playground.example.com",labels=mapOf("a" to "alpha","b" to "beta"))
     @Test fun `server domains distinguish instances and preserve only explicit legacy alias`() {
         val c=config();GameDomains.validate(c,setOf("a","b"))

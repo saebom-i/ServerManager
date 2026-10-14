@@ -26,7 +26,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.io.path.*
 
-data class GameNetworkConfig(val enabled:Boolean=false,val port:Int=6399,val sableUdpEnabled:Boolean=false,val baseDomain:String="",val targetHost:String="",
+data class GameNetworkConfig(val enabled:Boolean=false,val port:Int=6399,@get:com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_DEFAULT) val sableUdpEnabled:Boolean=false,val baseDomain:String="",val targetHost:String="",
     val defaultInstanceId:String?=null,val defaultHostname:String="",val labels:Map<String,String> = emptyMap(),val cloudflareEnabled:Boolean=false,val zoneId:String="")
 data class GameNetworkView(val config:GameNetworkConfig,val revision:Long,val tokenConfigured:Boolean)
 data class GameNetworkSave(val config:GameNetworkConfig,val revision:Long,val token:String?=null,val clearToken:Boolean=false)
