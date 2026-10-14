@@ -44,5 +44,6 @@ if [ "$ready" != true ]; then echo 'Isolated manager did not start.' >&2; exit 1
 test_config=playwright.runners-live.config.ts
 if [ "${SM_RUNNERS_UPDATE_PROTOCOL:-0}" = 1 ]; then test_config=playwright.runner-updates-live.config.ts; fi
 if [ "${SM_RUNNERS_WORKSPACE:-0}" = 1 ]; then test_config=playwright.workspace-live.config.ts; fi
+if [ "${SM_RUNNERS_SABLE:-0}" = 1 ]; then test_config=playwright.sable-live.config.ts; fi
 (cd frontend && npx playwright test --config "$test_config")
 echo "Live runner fixture results: $SM_RUNNERS_TEST_HOME (no production profile used)"

@@ -27,6 +27,7 @@ class RunnerIdleStopTest {
                 field<ConcurrentHashMap<String,Process>>(agent,"processes")["a"]=process
                 field<ConcurrentHashMap<String,Instance>>(agent,"configs")["a"]=Instance("a","fixture",loaderVersion="21.1.252",port=server.localPort,memoryMb=512,javaPath="java",runnerId="device")
                 if(mode!="unready")field<MutableSet<String>>(agent,"ready").add("a")
+                field<ConcurrentHashMap<String,Int>>(agent,"queryPorts")["a"]=server.localPort
                 val counter=AtomicLong();field<ConcurrentHashMap<String,AtomicLong>>(agent,"activity")["a"]=counter
                 val socket=mock(WebSocket::class.java);val messages=mutableListOf<String>()
                 doAnswer {call->messages.add(call.arguments[0].toString());CompletableFuture.completedFuture(socket)}.`when`(socket).sendText(any(CharSequence::class.java),anyBoolean())

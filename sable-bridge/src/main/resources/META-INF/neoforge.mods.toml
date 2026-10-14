@@ -1,0 +1,25 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+[[mods]]
+modId="servermanager_sable_bridge"
+version="1.0.0"
+displayName="Server Manager Sable Bridge"
+description="Server-only authenticated routing for the Server Manager Sable UDP relay."
+[[mixins]]
+config="servermanager-sable.mixins.json"
+[[dependencies.servermanager_sable_bridge]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.249,)"
+side="SERVER"
+[[dependencies.servermanager_sable_bridge]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1]"
+side="SERVER"
+[[dependencies.servermanager_sable_bridge]]
+modId="sable"
+type="required"
+versionRange="[2.0.6]"
+side="SERVER"

@@ -28,3 +28,5 @@ LOCAL-TEST-RESULTS.md
 **/security/proxy-token.txt
 **/security/setup-code.txt
 **/instance.json
+sable-bridge/.gradle/
+sable-bridge/build/

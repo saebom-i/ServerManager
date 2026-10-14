@@ -35,6 +35,7 @@ interface RemoteController {
     fun command(instance:Instance,value:String)
     fun completed(instance:Instance) {}
     fun sharedGamePort():Int?=null
+    fun sableStatus(instance:Instance):SableRelayStatus?=null
     fun stopIfEmpty(instance:Instance,requestId:String):Boolean=false
     fun importFolder(instance:Instance,requestId:String) {error("실행기를 업데이트한 뒤 기존 폴더를 가져오세요")}
 }
@@ -48,6 +49,7 @@ class RuntimeState {
     @Volatile var resources: ResourceSample? = null
     @Volatile var players: PlayerSample? = null
     @Volatile var playerQueryInProgress = false
+    @Volatile var queryPort:Int?=null
     @Volatile var remoteStopRequested = false
     @Volatile var remoteRestartRequested = false
     @Volatile var remoteWorkerReady = false
@@ -125,7 +127,7 @@ class ServerManager {
             if(r.playerQueryInProgress) return@forEach
             r.playerQueryInProgress=true
             workers.submit {
-                try { r.players=query.players(i.port) }
+                try { r.players=r.queryPort?.let(query::players) }
                 finally { r.playerQueryInProgress=false }
             }
         }
@@ -225,7 +227,7 @@ class ServerManager {
         val i = instance(id); val r = runtime(id)
         val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to (if(i.syncEnabled())serverDir(id).toString() else r.folderSource?.get("path") ?: "현재 실행기의 원본 서버 폴더"), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive,"modBusy" to (r.modBusy||r.remoteFileBusy)) }
         val transfer=synchronized(r) {mapOf("folderSource" to r.folderSource,"folderImport" to r.folderImport?.let(r.transferMeter::view),"fileTransfer" to r.fileTransfer?.let(r.transferMeter::view))}
-        return result+transfer+mapOf("powerSaving" to powerStatus?.invoke(id),"autoRestart" to autoRestartStatus?.invoke(id))
+        return result+transfer+mapOf("sableUdp" to remoteController?.sableStatus(i),"powerSaving" to powerStatus?.invoke(id),"autoRestart" to autoRestartStatus?.invoke(id))
     }
     private fun validate(req: CreateRequest) {
         require(req.name.isNotBlank() && req.name.length <= 80) { "이름은 1~80자로 입력하세요" }
@@ -282,7 +284,7 @@ class ServerManager {
         val path=serverDir(i.id).resolve("server.properties")
         val props=Properties(); if(path.exists()) path.inputStream().use { props.load(it) }
         props.setProperty("server-ip", "127.0.0.1"); props.setProperty("server-port", i.port.toString())
-        props.setProperty("enable-rcon", "false"); props.setProperty("enable-query", "true"); props.setProperty("query.port",i.port.toString())
+        props.setProperty("enable-rcon", "false"); runtime(i.id).queryPort=QueryEndpoint.configure(props,i.port)
         if(!props.containsKey("online-mode")) props.setProperty("online-mode", "true")
         if(!props.containsKey("view-distance")) props.setProperty("view-distance", "6")
         path.outputStream().use { props.store(it, "Local Server Manager") }
@@ -611,7 +613,7 @@ class ServerManager {
             r.idleCheckPending=true;r.idleRequestAt=System.nanoTime();r.process
         } ?: run {synchronized(r){r.idleCheckPending=false};return false}
         try {
-            val count=query.currentCount(i.port)
+            val count=r.queryPort?.let(query::currentCount)
             synchronized(r) {
                 if(r.process!==process||!process.isAlive||r.state!="RUNNING"||r.diagnosticActive||r.activityVersion!=activity||count!=0){r.players=null;r.activityVersion++;return false}
                 r.stopReason="IDLE";command(id,"stop");r.event("system","${powerStatus?.invoke(id)?.config?.minutes ?: 30}분 연속 무인 상태를 확인하여 저장 후 정상 종료합니다")

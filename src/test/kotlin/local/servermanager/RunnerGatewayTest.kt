@@ -96,13 +96,13 @@ class RunnerGatewayTest {
     @Test fun `two computers share one public port without mixing streams and one stop leaves the other online`() {
         val port=ServerSocket(0).use {it.localPort}
         val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java);val network=mock(GameNetwork::class.java)
-        `when`(network.config()).thenReturn(GameNetworkConfig(enabled=true,port=port,baseDomain="server.example.com"))
+        `when`(network.config()).thenReturn(GameNetworkConfig(enabled=true,sableUdpEnabled=true,port=port,baseDomain="server.example.com"))
         `when`(network.resolve("alpha.server.example.com")).thenReturn("alpha")
         `when`(network.resolve("beta.server.example.com")).thenReturn("beta")
         val gateway=RunnerGateway(registry,manager,network);val mapper=jacksonObjectMapper()
         val sent=mutableMapOf<String,MutableList<WebSocketMessage<*>>>()
         fun session(id:String,instance:String,platform:String):WebSocketSession {
-            val device=RunnerDevice(id,id,platform,"user","key","now",version="0.4.0-beta.5",allowedInstanceIds=setOf(instance))
+            val device=RunnerDevice(id,id,platform,"user","key","now",version="0.4.6",allowedInstanceIds=setOf(instance))
             `when`(registry.active(id)).thenReturn(device);`when`(registry.online(id)).thenReturn(true)
             val session=mock(WebSocketSession::class.java);`when`(session.attributes).thenReturn(mutableMapOf<String,Any>("runnerId" to id));`when`(session.isOpen).thenReturn(true)
             val messages=Collections.synchronizedList(mutableListOf<WebSocketMessage<*>>());sent[id]=messages
@@ -134,6 +134,28 @@ class RunnerGatewayTest {
                 val (sa,_)=open(pa,"mac",a,"alpha.server.example.com\u0000FML3\u0000")
                 val (sb,_)=open(pb,"windows",b,"beta.server.example.com")
                 assertNotEquals(sa,sb)
+                fun dataSocket(runner:String):Pair<WebSocketSession,MutableList<WebSocketMessage<*>>> {
+                    val socket=mock(WebSocketSession::class.java);`when`(socket.attributes).thenReturn(mutableMapOf<String,Any>("runnerId" to runner,"sableUdp" to true));`when`(socket.isOpen).thenReturn(true)
+                    val frames=Collections.synchronizedList(mutableListOf<WebSocketMessage<*>>());doAnswer {frames.add(it.arguments[0] as WebSocketMessage<*>);null}.`when`(socket).sendMessage(any());gateway.afterConnectionEstablished(socket);return socket to frames
+                }
+                val (ua,framesA)=dataSocket("mac");val (ub,framesB)=dataSocket("windows")
+                val authA=java.util.UUID.randomUUID();val authB=java.util.UUID.randomUUID()
+                gateway.handleMessage(a,TextMessage(mapper.writeValueAsString(RunnerMessage("sable-register","alpha",streamId=sa,token=authA.toString()))))
+                gateway.handleMessage(b,TextMessage(mapper.writeValueAsString(RunnerMessage("sable-register","beta",streamId=sb,token=authB.toString()))))
+                java.net.DatagramSocket().use {udpA->java.net.DatagramSocket().use {udpB->
+                    fun authenticate(udp:java.net.DatagramSocket,token:java.util.UUID){val bytes=byteArrayOf(3,36)+token.toString().toByteArray();udp.send(java.net.DatagramPacket(bytes,bytes.size,java.net.InetAddress.getByName("127.0.0.1"),port))}
+                    authenticate(udpA,authA);authenticate(udpB,authB)
+                    await {synchronized(framesA){framesA.filterIsInstance<BinaryMessage>().firstOrNull()}}
+                    await {synchronized(framesB){framesB.filterIsInstance<BinaryMessage>().firstOrNull()}}
+                    assertEquals(sa,(framesA.first() as BinaryMessage).payload.asReadOnlyBuffer().int)
+                    assertEquals(sb,(framesB.first() as BinaryMessage).payload.asReadOnlyBuffer().int)
+                    val reply=ByteBuffer.allocate(5).putInt(sa).put(4).array()
+                    gateway.handleMessage(ub,BinaryMessage(reply));udpA.soTimeout=80
+                    assertFailsWith<java.net.SocketTimeoutException>{udpA.receive(java.net.DatagramPacket(ByteArray(32),32))}
+                    gateway.handleMessage(ua,BinaryMessage(reply));udpA.soTimeout=2000
+                    val packet=java.net.DatagramPacket(ByteArray(32),32);udpA.receive(packet);assertEquals(4,packet.data[0].toInt())
+                }}
+
                 downstream(b,sa,"leak");pa.soTimeout=100
                 assertFailsWith<java.net.SocketTimeoutException>{pa.getInputStream().read()};pa.soTimeout=3000
                 downstream(a,sa,"a");downstream(b,sb,"b")

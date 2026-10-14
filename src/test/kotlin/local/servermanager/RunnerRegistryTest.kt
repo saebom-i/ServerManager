@@ -40,6 +40,12 @@ class RunnerRegistryTest {
             val bytes="connect:nonce".toByteArray()
             val signature=Signature.getInstance("Ed25519").apply { initSign(key.private);update(bytes) }.sign()
             assertTrue(registry.verify(runner.id,bytes,Base64.getUrlEncoder().withoutPadding().encodeToString(signature)))
+            val timestamp=System.currentTimeMillis();val nonce="abcdefghijklmnopqrstuvwx"
+            fun signed(purpose:String,n:String)=Base64.getUrlEncoder().withoutPadding().encodeToString(Signature.getInstance("Ed25519").apply {initSign(key.private);update("$purpose\n${runner.id}\n$timestamp\n$n\n".toByteArray())}.sign())
+            assertFalse(registry.acceptUdpConnection(runner.id,timestamp,nonce,signed("sm-runner-v1",nonce)))
+            assertTrue(registry.acceptUdpConnection(runner.id,timestamp,nonce,signed("sm-runner-udp-v1",nonce)))
+            assertFalse(registry.acceptUdpConnection(runner.id,timestamp,nonce,signed("sm-runner-udp-v1",nonce)))
+            assertFalse(registry.acceptConnection(runner.id,timestamp,nonce,signed("sm-runner-v1",nonce)))
             registry.seen(runner.id,"0.4.4");registry.updateStatus(runner.id,RunnerUpdateStatus())
             assertFails {registry.requestUpdate(admin.id,runner.id,false)}
             registry.requestUpdate(viewer.id,runner.id,false)

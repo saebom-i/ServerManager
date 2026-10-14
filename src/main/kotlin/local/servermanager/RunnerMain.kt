@@ -140,6 +140,23 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
     private val ready=ConcurrentHashMap.newKeySet<String>()
     private val activity=ConcurrentHashMap<String,AtomicLong>()
     private val query=MinecraftQuery()
+    private val queryPorts=ConcurrentHashMap<String,Int>()
+    private val sableRegistrations=ConcurrentHashMap<String,CompletableFuture<Boolean>>()
+    private val sable by lazy { SableRunner(client,identity.managerUrl,{udpHeaders()},
+        {port->gameStreams.entries.firstOrNull {it.value.localPort==port && !it.value.isClosed}?.let {entry->streamInstances[entry.key]?.let {it to entry.key}}},
+        {stream->streamInstances[stream]?.let {id->configs[id]?.takeIf {processes[id]?.isAlive==true && id in ready && id !in stopping}?.port}},
+        {id,stream,token->
+            val result=CompletableFuture<Boolean>();sableRegistrations[token]=result
+            try {send(RunnerMessage("sable-register",id,streamId=stream,token=token)) && result.get(1200,TimeUnit.MILLISECONDS)}catch(_:Exception){false}finally{sableRegistrations.remove(token)}
+        }) }
+    private val streamInstances=ConcurrentHashMap<Int,String>()
+    private fun udpHeaders():Map<String,String> {
+        val timestamp=System.currentTimeMillis();val nonce=Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(24).also {SecureRandom().nextBytes(it)})
+        val bytes="sm-runner-udp-v1\n${identity.id}\n$timestamp\n$nonce\n".toByteArray()
+        val signature=Signature.getInstance("Ed25519").apply {initSign(signingKey());update(bytes)}.sign()
+        return mapOf("X-SM-Runner-Id" to identity.id,"X-SM-Timestamp" to timestamp.toString(),"X-SM-Nonce" to nonce,"X-SM-Signature" to Base64.getUrlEncoder().withoutPadding().encodeToString(signature))
+    }
+
     private val metrics=ProcessMetrics()
     private val folders=RunnerFolders(home)
     private fun instanceRoot(id:String)=home.resolve("instances").resolve(id)
@@ -184,7 +201,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
                 workers.submit { checkRunnerUpdate() }
             }
             if(restartForUpdate()) kotlin.system.exitProcess(75)
-            send(RunnerMessage("heartbeat",version=version()))
+            send(RunnerMessage("heartbeat",version=version()));sable.heartbeat()
             reportUpdate()
             reportFolders()
             home.resolve("instances").takeIf {it.exists()}?.listDirectoryEntries()?.forEach {dir->dir.resolve("install-result.json").takeIf {it.exists()}?.let {file->runCatching {send(mapper.readValue<RunnerMessage>(file.readText()))}}}
@@ -202,6 +219,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
             }}}
             closed.await(10,TimeUnit.SECONDS)
         }
+        sable.disconnect();streamInstances.clear();sableRegistrations.values.forEach {it.complete(false)};sableRegistrations.clear()
         sessionToken=null;connection.set(null)
         gameStreams.values.forEach { runCatching { it.close() } };gameStreams.clear()
     }
@@ -235,7 +253,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
         processes.values.forEach { runCatching { it.waitFor() } }
         installationProcesses.values.forEach {runCatching {it.waitFor()}}
         if(!updatePauseRequested)home.resolve("instances").takeIf { it.exists() }?.let { root -> Files.list(root).use { paths -> paths.filter { it.resolve("dirty").exists() }.forEach { dir -> uploadStopped(dir.fileName.toString()) } } }
-        workers.shutdown()
+        sable.close();workers.shutdown()
     }
     override fun onOpen(webSocket:WebSocket) { webSocket.request(1) }
     override fun onText(webSocket:WebSocket,data:CharSequence,last:Boolean):CompletionStage<*> {
@@ -246,6 +264,9 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
                 val raw=textBuffer.toString();textBuffer.setLength(0)
                 runCatching { mapper.readValue<RunnerMessage>(raw) }.getOrNull()?.let { message ->
                     when(message.type) {
+                        "sable-config" -> {sable.enabled=message.state=="ON"}
+                        "sable-registered" -> message.token?.let {sableRegistrations[it]?.complete(message.state=="OK")}
+
                         "session" -> { sessionToken=message.token;reportUpdate();recoverStates() }
                         "update-request" -> if(message.detail in setOf("WHEN_IDLE","PAUSE_TRANSFER")) {
                             requestUpdate(message.detail=="PAUSE_TRANSFER")
@@ -259,7 +280,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
                         "restart" -> message.instanceId?.let { stop(it) }
                         "command" -> if(message.instanceId!=null && message.command!=null) command(message.instanceId,message.command)
                         "open" -> if(message.instanceId!=null && message.streamId!=null) openGame(message.instanceId,message.streamId)
-                        "close" -> message.streamId?.let { gameStreams.remove(it)?.close() }
+                        "close" -> message.streamId?.let { sable.closeStream(it);streamInstances.remove(it);gameStreams.remove(it)?.close() }
                     }
                 }
             }
@@ -305,13 +326,13 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
             try {
                 socket.connect(InetSocketAddress("127.0.0.1",port),3000)
                 socket.soTimeout=60000
-                gameStreams[streamId]=socket
+                gameStreams[streamId]=socket;streamInstances[streamId]=instanceId
                 if(!send(RunnerMessage("opened",instanceId=instanceId,streamId=streamId)))return@submit
                 val input=socket.getInputStream();val buffer=ByteArray(64*1024)
                 while(true) { val count=input.read(buffer);if(count<0)break;if(!sendBinary(streamId,buffer,count))break }
             } catch (_:Exception) {}
             finally {
-                gameStreams.remove(streamId,socket)
+                gameStreams.remove(streamId,socket);streamInstances.remove(streamId);sable.closeStream(streamId)
                 runCatching { socket.close() }
                 send(RunnerMessage("closed",instanceId=instanceId,streamId=streamId))
             }
@@ -366,7 +387,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
             check(!folders.custom(id)) {"기존 폴더에는 설치하지 않습니다. 폴더 가져오기 또는 동기화 OFF로 기존 서버를 사용하세요"}
             configs[id]=instance;instanceRoot(id).createDirectories();atomicText(instanceRoot(id).resolve("instance.json"),raw)
             val base=serverDir(id).also {it.createDirectories()};check(!base.resolve("world").exists()) {"월드가 있는 폴더에는 새로 설치하지 않습니다"}
-            val props=base.resolve("server.properties");if(!props.exists())props.writeText("server-ip=127.0.0.1\nserver-port=${instance.port}\nenable-query=true\nquery.port=${instance.port}\n")
+            val props=base.resolve("server.properties");if(!props.exists())props.writeText("server-ip=127.0.0.1\nserver-port=${instance.port}\nenable-query=false\n")
             base.resolve("eula.txt").writeText("eula=true\n")
             val installer=LauncherInstaller(LauncherCatalog(home.resolve("launcher-catalogs")))
             installer.install(instance.copy(javaPath=javaBin()),base,instanceRoot(id).resolve("installer.jar"),{args->
@@ -527,14 +548,16 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
         val properties=serverDir(id).resolve("server.properties")
         val values=Properties();properties.inputStream().use { values.load(it) }
         values.setProperty("server-ip","127.0.0.1");values.setProperty("server-port",instance.port.toString())
-        values.setProperty("enable-query","true");values.setProperty("query.port",instance.port.toString())
+        queryPorts[id]=QueryEndpoint.configure(values,instance.port)
         properties.outputStream().use { values.store(it,"Server Manager Runner") }
         ready.remove(id)
         activity[id]=AtomicLong()
         val crashesBefore=CrashReports.snapshot(serverDir(id))
         instanceRoot(id).resolve("exit.json").deleteIfExists()
-        val process=ProcessBuilder(args)
-            .directory(serverDir(id).toFile()).redirectErrorStream(true).start()
+        val builder=ProcessBuilder(args).directory(serverDir(id).toFile()).redirectErrorStream(true)
+        val udpStatus=runCatching {sable.prepare(instance,serverDir(id),builder)}.getOrElse {"UDP 초기화 실패 · TCP 대체 통신을 사용합니다"}
+        send(RunnerMessage("sable-status",id,detail=udpStatus))
+        val process=builder.start()
         onSpawned()
         processes[id]=process
         dirty(id).writeText("${process.pid()}|${process.info().startInstant().orElse(Instant.now()).toEpochMilli()}")
@@ -553,7 +576,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
                     ready.add(id);if(id !in stopping)send(RunnerMessage("state",id,"RUNNING",version(),pid=process.pid()))
                 }
             } } }
-            val code=process.waitFor()
+            val code=process.waitFor();sable.stopped(id);queryPorts.remove(id)
             atomicText(instanceRoot(id).resolve("exit.json"),mapper.writeValueAsString(RunnerExitReport(code,CrashReports.changed(serverDir(id),crashesBefore))))
             ready.remove(id)
             stopping.remove(id)
@@ -670,7 +693,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
     private fun stopIfEmpty(id:String,requestId:String) {
         val process=processes[id];val counter=activity[id];val before=counter?.get()
         val config=configs[id]
-        val count=if(process?.isAlive==true&&id in ready&&id !in stopping&&config!=null)query.currentCount(config.port) else null
+        val count=if(process?.isAlive==true&&id in ready&&id !in stopping&&config!=null)queryPorts[id]?.let(query::currentCount) else null
         val accepted=process!=null&&counter!=null&&processes[id]===process&&process.isAlive&&id in ready&&id !in stopping&&counter.get()==before&&count==0&&stop(id)
         send(RunnerMessage("idle-result",instanceId=id,state=if(accepted)"ACCEPTED" else "DENIED",detail=requestId))
     }
@@ -681,7 +704,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
     private fun report(id:String,process:Process) {
         if(!process.isAlive)return
         val sample=metrics.sample(process.toHandle())
-        val players=configs[id]?.let { query.players(it.port) }
+        val players=queryPorts[id]?.let(query::players)
         send(RunnerMessage("state",id,if(id in stopping)"STOPPING" else if(id in ready)"RUNNING" else "STARTING",version(),pid=process.pid(),cpuPercent=sample.cpuPercent,rssMb=sample.rssMb,
             uptimeSeconds=sample.uptimeSeconds,playerCount=players?.count,players=players?.names))
     }

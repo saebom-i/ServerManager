@@ -85,12 +85,14 @@ class RunnerRegistry(private val manager:ServerManager,private val auth:AuthStor
             Signature.getInstance("Ed25519").apply { initVerify(key);update(message) }.verify(Base64.getUrlDecoder().decode(signature))
         }.getOrDefault(false)
     }
-    @Synchronized fun acceptConnection(id:String,timestamp:Long,nonce:String,signature:String):Boolean {
+    fun acceptConnection(id:String,timestamp:Long,nonce:String,signature:String):Boolean=acceptPurpose(id,timestamp,nonce,signature,"sm-runner-v1")
+    fun acceptUdpConnection(id:String,timestamp:Long,nonce:String,signature:String):Boolean=acceptPurpose(id,timestamp,nonce,signature,"sm-runner-udp-v1")
+    @Synchronized private fun acceptPurpose(id:String,timestamp:Long,nonce:String,signature:String,purpose:String):Boolean {
         val now=System.currentTimeMillis()
         nonces.entries.removeIf { it.value<now-120000 }
         if(nonces.size>=10000)return false
         if(kotlin.math.abs(now-timestamp)>60000 || nonce.length !in 20..100 || !nonce.matches(Regex("[A-Za-z0-9_-]+")) || nonces.containsKey("$id:$nonce")) return false
-        val challenge="sm-runner-v1\n$id\n$timestamp\n$nonce\n".toByteArray()
+        val challenge="$purpose\n$id\n$timestamp\n$nonce\n".toByteArray()
         if(!verify(id,challenge,signature)) return false
         nonces["$id:$nonce"]=now
         return true

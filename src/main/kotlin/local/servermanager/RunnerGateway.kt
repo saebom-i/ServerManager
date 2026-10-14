@@ -44,6 +44,13 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     private val workspaceRequests=ConcurrentHashMap<String,PendingWorkspace>()
     private val workspaceSlots=java.util.concurrent.Semaphore(32)
 
+    private val sableStates=ConcurrentHashMap<String,String>()
+    private val udpSessions=ConcurrentHashMap<String,WebSocketSession>()
+    private val udpOutboxes=ConcurrentHashMap<String,DatagramOutbox>()
+    private val sable=SableRelay({runner,stream->
+        sockets[stream]?.takeIf {it.runnerId==runner && it.socket.isConnected && !it.socket.isClosed && connected(runner) && registry.active(runner)?.allowedInstanceIds?.contains(it.instanceId)==true}
+            ?.let {SableRoute(it.instanceId,it.socket.inetAddress)}
+    },{runner,frame->udpOutboxes[runner]?.offer(frame)==true})
     private val sockets=ConcurrentHashMap<Int,GameStream>()
     private val listeners=ConcurrentHashMap<String,ServerSocket>()
     private val streams=AtomicInteger(1)
@@ -52,9 +59,18 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     private var sharedListener:ServerSocket?=null
     private val io=Executors.newCachedThreadPool()
     private data class GameStream(val id:Int,val runnerId:String,val instanceId:String,val socket:Socket,val opened:CountDownLatch=CountDownLatch(1))
+    @jakarta.annotation.PreDestroy fun closeDatagrams(){sable.close();udpOutboxes.values.forEach {it.close()};udpOutboxes.clear();udpSessions.values.forEach {runCatching {it.close()}};udpSessions.clear()}
     @PostConstruct fun attach() { manager.attachRemoteController(this) }
     override fun afterConnectionEstablished(session:WebSocketSession) {
         val id=session.attributes["runnerId"] as? String ?: run { session.close(CloseStatus.POLICY_VIOLATION);return }
+        if(session.attributes["sableUdp"]==true) {
+            if(!connected(id)){session.close(CloseStatus.POLICY_VIOLATION);return}
+            session.binaryMessageSizeLimit=65511
+            val decorated=org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator(session,1000,1024*1024)
+            udpSessions.put(id,session)?.let {runCatching {it.close()}}
+            udpOutboxes.put(id,DatagramOutbox {frame->runCatching {decorated.sendMessage(BinaryMessage(frame));true}.getOrDefault(false)})?.close()
+            return
+        }
         registry.connected(id)
         sessions.put(id,session)?.takeIf { it!==session }?.let { previous ->
             sockets.values.filter {it.runnerId==id}.forEach {closeStream(it,false)}
@@ -74,6 +90,14 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         if(message.payload.length>256*1024) { session.close(CloseStatus.TOO_BIG_TO_PROCESS);return }
         val event=runCatching { mapper.readValue<RunnerMessage>(message.payload) }.getOrNull() ?: return
         when(event.type) {
+            "sable-register" -> {
+                val stream=event.streamId;val instance=event.instanceId;val token=event.token
+                val accepted=stream!=null && instance!=null && token!=null && network?.config()?.sableUdpEnabled==true &&
+                    runCatching {sable.register(id,stream,instance,java.util.UUID.fromString(token))}.getOrDefault(false)
+                send(id,RunnerMessage("sable-registered",instanceId=instance,state=if(accepted)"OK" else "DENIED",streamId=stream,token=token))
+            }
+            "sable-status" -> event.instanceId?.let {instance->if(manager.instance(instance).runnerId==id && registry.active(id)?.allowedInstanceIds?.contains(instance)==true)sableStates[instance]=event.detail?.take(200) ?: "TCP_FALLBACK"}
+
             "workspace-result" -> event.token?.let {key->workspaceRequests[key]?.takeIf {it.runner==id && it.instance==event.instanceId}?.let {pending->
                 if(event.state=="OK")runCatching {mapper.readTree(event.detail ?: "{}")}.onSuccess {pending.future.complete(it)}.onFailure {pending.future.completeExceptionally(it)}
                 else pending.future.completeExceptionally(IllegalStateException(event.detail?.take(500) ?: "실행기 파일 작업 실패"))
@@ -113,6 +137,11 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     }
     override fun handleBinaryMessage(session:WebSocketSession,message:BinaryMessage) {
         val id=session.attributes["runnerId"] as? String ?: return
+        if(session.attributes["sableUdp"]==true) {
+            if(udpSessions[id]!==session || !connected(id))return
+            val buffer=message.payload;if(buffer.remaining() !in 5..65511)return
+            sable.downstream(id,ByteArray(buffer.remaining()).also(buffer::get));return
+        }
         if(sessions[id]!==session)return
         val buffer=message.payload
         if(buffer.remaining()<4 || buffer.remaining()>65540)return
@@ -123,7 +152,9 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     }
     override fun afterConnectionClosed(session:WebSocketSession,status:CloseStatus) {
         val id=session.attributes["runnerId"] as? String ?: return
+        if(session.attributes["sableUdp"]==true){if(udpSessions.remove(id,session)){udpOutboxes.remove(id)?.close();sable.removeRunner(id)};return}
         if(sessions.remove(id,session)) {
+            udpOutboxes.remove(id)?.close();udpSessions.remove(id)?.let {runCatching {it.close()}};sable.removeRunner(id)
             tokens.remove(id);registry.disconnected(id);manager.remoteDisconnected(id)
             workspaceRequests.values.filter {it.runner==id}.forEach {it.future.completeExceptionally(IllegalStateException("실행기가 연결 해제됐습니다. 파일을 다시 확인하세요"))}
             sockets.values.filter { it.runnerId==id }.forEach { closeStream(it,false) }
@@ -191,6 +222,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
                 }
             }
         }
+        if(config.sableUdpEnabled)sable.listen(config.port)
         activeRoutes[instance.id]=runnerId
     }
     private fun openRelay(instance:Instance,runnerId:String) {
@@ -202,6 +234,14 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         listeners[instance.id]=listener
         io.submit {while(!listener.isClosed){val socket=runCatching {listener.accept()}.getOrNull() ?: break;relayPlayer(socket,instance.id,runnerId)}}
     }
+    override fun sableStatus(instance:Instance):SableRelayStatus {
+        if(network?.config()?.sableUdpEnabled!=true)return SableRelayStatus("OFF")
+        val runner=instance.runnerId ?: return SableRelayStatus("UNSUPPORTED",message="원격 실행기를 선택하세요")
+        if(!runCatching {SignedUpdates.compare(registry.active(runner)?.version ?: "unknown","0.4.6")>=0}.getOrDefault(false))return SableRelayStatus("UNSUPPORTED",message="실행기 0.4.6 이상이 필요합니다")
+        val state=sableStates[instance.id]
+        if(state!=null && state!="READY")return SableRelayStatus("TCP_FALLBACK",message=state)
+        return sable.status(instance.id)
+    }
     override fun sharedGamePort():Int?=network?.config()?.takeIf {it.enabled}?.port
     override fun stopIfEmpty(instance:Instance,requestId:String):Boolean {
         val id=requireRunner(instance)
@@ -211,6 +251,7 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     }
     private fun closeStream(stream:GameStream,notify:Boolean) {
         if(sockets.remove(stream.id,stream)) {
+            sable.removeStream(stream.runnerId,stream.id)
             runCatching { stream.socket.close() }
             if(notify)send(stream.runnerId,RunnerMessage("close",instanceId=stream.instanceId,streamId=stream.id))
         }
@@ -246,6 +287,9 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         }
         if(instance.diagnosticSession!=null)check(runCatching {SignedUpdates.compare(registry.active(id)?.version ?: "unknown","0.4.3")>=0}.getOrDefault(false)) {"격리 모드 검사를 위해 실행기를 0.4.3 이상으로 업데이트하세요"}
         openRelay(instance,id)
+        if(runCatching {SignedUpdates.compare(registry.active(id)?.version ?: "unknown","0.4.6")>=0}.getOrDefault(false))
+            send(id,RunnerMessage("sable-config",state=if(network?.config()?.enabled==true && network.config().sableUdpEnabled)"ON" else "OFF"))
+        sableStates.remove(instance.id)
         if(!send(id,RunnerMessage("start",instanceId=instance.id,detail=mapper.writeValueAsString(instance)))) {
             completed(instance);error("실행기에 시작 명령을 전달하지 못했습니다")
         }
@@ -260,7 +304,8 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
     override fun command(instance:Instance,value:String) { check(send(requireRunner(instance),RunnerMessage("command",instanceId=instance.id,command=value))) { "실행기에 콘솔 명령을 전달하지 못했습니다" } }
     @Synchronized override fun completed(instance:Instance) {
         activeRoutes.remove(instance.id)
-        if(activeRoutes.isEmpty()){sharedListener?.close();sharedListener=null}
+        if(activeRoutes.isEmpty()){sharedListener?.close();sharedListener=null;sable.close()}
+        sableStates.remove(instance.id)
         listeners.remove(instance.id)?.close()
         sockets.values.filter { it.instanceId==instance.id }.forEach { closeStream(it,true) }
     }
@@ -276,10 +321,11 @@ class RunnerSocketConfig(private val gateway:RunnerGateway,private val devices:R
                 val timestamp=request.headers.getFirst("X-SM-Timestamp")?.toLongOrNull()
                 val nonce=request.headers.getFirst("X-SM-Nonce")
                 val signature=request.headers.getFirst("X-SM-Signature")
-                if(id==null || timestamp==null || nonce==null || signature==null || !devices.acceptConnection(id,timestamp,nonce,signature)) {
+                val udp=request.headers.getFirst("X-SM-Channel")=="sable-udp"
+                if(id==null || timestamp==null || nonce==null || signature==null || !(if(udp)devices.acceptUdpConnection(id,timestamp,nonce,signature) else devices.acceptConnection(id,timestamp,nonce,signature))) {
                     response.setStatusCode(HttpStatus.FORBIDDEN);return false
                 }
-                attributes["runnerId"]=id
+                attributes["runnerId"]=id;attributes["sableUdp"]=udp
                 return true
             }
             override fun afterHandshake(request:ServerHttpRequest,response:ServerHttpResponse,wsHandler:org.springframework.web.socket.WebSocketHandler,exception:Exception?) {}
