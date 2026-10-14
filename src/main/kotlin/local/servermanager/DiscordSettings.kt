@@ -16,6 +16,7 @@ import kotlin.io.path.*
 
 data class DiscordGrant(val guildId:String, val roleId:String, val instanceId:String, val canStart:Boolean = false, val canStop:Boolean = false, val canRestart:Boolean = false)
 data class DiscordAlertRoute(val guildId:String, val channelId:String, val instanceId:String, val errors:Boolean = true, val stops:Boolean = true, val panel:Boolean = false, val starts:Boolean = true) {
+    fun accepts(signal:ServerSignal)=if(signal.kind=="stop" && signal.exit?.requested==false)errors else accepts(signal.kind)
     fun accepts(kind:String)=when(kind) {"error"->errors;"stop"->stops;"start"->starts;else->false}
 }
 data class DiscordSuperAdmin(val guildId:String, val roleId:String)

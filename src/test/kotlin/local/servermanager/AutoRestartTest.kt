@@ -101,6 +101,6 @@ class AutoRestartTest {
         assertTrue(route.accepts("start"));assertTrue(route.accepts("stop"));assertTrue(route.accepts("error"));assertFalse(route.accepts("import"))
         assertFalse(route.copy(starts=false).accepts("start"));assertFalse(route.copy(stops=false).accepts("stop"))
         val alerts=DiscordAlerts();alerts.offer(ServerSignal("a","stop","crash",ServerExit(1,false,"UNEXPECTED","crash.txt")))
-        assertEquals("crash.txt",alerts.drain(1000).single().first.exit?.crashReport)
+        assertEquals("crash.txt",alerts.drain().single().first.exit?.crashReport)
     }
 }

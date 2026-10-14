@@ -41,12 +41,12 @@ export const DiscordSettings=memo(function DiscordSettings({instances}:Props){
  <label className="check-label"><input type="checkbox" checked={g.canRestart} onChange={e=>change({...config,grants:config.grants.map((x,n)=>n===index?{...x,canRestart:e.target.checked}:x)})}/>서버 재시작 허용</label>
  <button type="button" onClick={()=>change({...config,grants:config.grants.filter((_,n)=>n!==index)})}>역할 규칙 삭제</button></div>)}
  <button type="button" onClick={()=>change({...config,grants:[...config.grants,{guildId:status?.guilds[0]?.id||'',roleId:'',instanceId:instances[0]?.config.id||'',canStart:false,canStop:false,canRestart:false}]})}>역할 규칙 추가</button>
- <h3>서버별 제어 패널·알림</h3><p className="muted">패널을 켠 채널은 해당 Minecraft 서버 전용으로 사용합니다. 기존 메시지를 정리하고 패널·알림만 남기므로 별도 채널을 지정하세요. 반복 오류는 1분 단위로 묶습니다.</p>
+ <h3>서버별 제어 패널·알림</h3><p className="muted">패널을 켠 채널은 해당 Minecraft 서버 전용으로 사용합니다. 기존 메시지를 정리하고 패널·알림만 남기므로 별도 채널을 지정하세요. 실행 중의 오류는 카운트에만 반영하고, 실제 비정상 종료 때 오류 요약을 알립니다.</p>
  {config.alerts.map((a,index)=><div className="discord-rule" key={index}>
  <label>알림 Discord 서버 ID<input required inputMode="numeric" pattern="[1-9][0-9]{16,19}" value={a.guildId} onChange={e=>change({...config,alerts:config.alerts.map((x,n)=>n===index?{...x,guildId:e.target.value.trim()}:x)})}/></label>
  <label>텍스트 채널 ID<input required inputMode="numeric" pattern="[1-9][0-9]{16,19}" value={a.channelId} onChange={e=>change({...config,alerts:config.alerts.map((x,n)=>n===index?{...x,channelId:e.target.value.trim()}:x)})}/></label>
  {serverSelect(a.instanceId,id=>change({...config,alerts:config.alerts.map((x,n)=>n===index?{...x,instanceId:id}:x)}),'알림 대상 Minecraft 서버')}
- <label className="check-label"><input type="checkbox" checked={a.errors} onChange={e=>change({...config,alerts:config.alerts.map((x,n)=>n===index?{...x,errors:e.target.checked}:x)})}/>오류 알림</label>
+ <label className="check-label"><input type="checkbox" checked={a.errors} onChange={e=>change({...config,alerts:config.alerts.map((x,n)=>n===index?{...x,errors:e.target.checked}:x)})}/>비정상 종료·크래시 알림</label>
  <label className="check-label"><input type="checkbox" checked={a.starts} onChange={e=>change({...config,alerts:config.alerts.map((x,n)=>n===index?{...x,starts:e.target.checked}:x)})}/>시작 완료 알림</label>
  <label className="check-label"><input type="checkbox" checked={a.stops} onChange={e=>change({...config,alerts:config.alerts.map((x,n)=>n===index?{...x,stops:e.target.checked}:x)})}/>종료 알림</label>
  <label className="check-label"><input type="checkbox" checked={a.panel} onChange={e=>change({...config,alerts:config.alerts.map((x,n)=>n===index?{...x,panel:e.target.checked}:x)})}/>전용 채널 제어 패널</label>

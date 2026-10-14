@@ -63,18 +63,14 @@ class DiscordTest {
         val error=assertFailsWith<IllegalStateException> { store.token() }
         assertFalse(error.message!!.contains(token))
     }
-    @Test fun `error bursts coalesce independently per server while stops deliver promptly`() {
+    @Test fun `ordinary error bursts never enqueue standalone messages while lifecycle alerts remain`() {
         val a=DiscordAlerts()
-        repeat(7000) { a.offer(ServerSignal("a","error","error detected")) }
-        a.offer(ServerSignal("b","error","other"))
-        val first=a.drain(100000)
-        assertEquals(2,first.size);assertEquals(7000,first.first().second)
-        a.offer(ServerSignal("a","error","new"));a.offer(ServerSignal("a","stop","requested stop"))
-        assertEquals(listOf("stop"),a.drain(100010).map { it.first.kind })
-        assertTrue(a.drain(159999).isEmpty())
-        assertEquals(1,a.drain(160000).single().second)
-        assertTrue(a.drain(300000).isEmpty())
-        a.offer(ServerSignal("a","error","discard"));a.clear();assertTrue(a.drain(400000).isEmpty())
+        repeat(7000){a.offer(ServerSignal("a","error","ordinary error"))}
+        assertTrue(a.drain().isEmpty())
+        a.offer(ServerSignal("a","start","ready"));a.offer(ServerSignal("a","stop","unexpected exit",ServerExit(1,false,"UNEXPECTED")))
+        assertEquals(listOf("start","stop"),a.drain().map {it.first.kind})
+        a.offer(ServerSignal("a","import","not a shutdown"));assertTrue(a.drain().isEmpty())
+        a.offer(ServerSignal("a","stop","discard"));a.clear();assertTrue(a.drain().isEmpty())
     }
     @Test fun `commands authorize before control deduplicate and revoke without reconnecting`() {
         DiscordSettingsStore(temp.resolve("security/discord")).save(DiscordSave(config(),0,token)) { true }

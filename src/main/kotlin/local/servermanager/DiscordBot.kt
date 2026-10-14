@@ -35,28 +35,20 @@ import java.time.Instant
 import java.awt.Color
 import kotlin.concurrent.read
 
-/** Bounded aggregation: no raw log lines, network work or unbounded queue on the process reader. */
+/** Only lifecycle notices enter this bounded queue; ordinary errors update the panel counter only. */
 class DiscordAlerts {
-    private data class Pending(var count:Int, var signal:ServerSignal)
+    private data class Pending(var count:Int,var signal:ServerSignal)
     private val pending=linkedMapOf<Pair<String,String>,Pending>()
-    private val last=mutableMapOf<Pair<String,String>,Long>()
     @Synchronized fun offer(event:ServerSignal) {
+        if(event.kind !in setOf("start","stop"))return
         val key=event.instanceId to event.kind
-        if(key !in pending && pending.size>=1000) return
-        pending.getOrPut(key) { Pending(0,event) }.apply { count=(count+1).coerceAtMost(1000000); signal=event }
+        if(key !in pending && pending.size>=1000)return
+        pending.getOrPut(key){Pending(0,event)}.apply {count=(count+1).coerceAtMost(1000000);signal=event}
     }
-    @Synchronized fun drain(now:Long):List<Pair<ServerSignal,Int>> {
-        last.entries.removeIf { now-it.value>120000 }
-        val result=mutableListOf<Pair<ServerSignal,Int>>()
-        val iterator=pending.iterator()
-        while(iterator.hasNext()) {
-            val (key,p)=iterator.next()
-            if(key.second=="error" && now-(last[key] ?: Long.MIN_VALUE/2)<60000) continue
-            result.add(p.signal to p.count);last[key]=now;iterator.remove()
-        }
-        return result
+    @Synchronized fun drain():List<Pair<ServerSignal,Int>> {
+        val result=pending.values.map {it.signal to it.count};pending.clear();return result
     }
-    @Synchronized fun clear() { pending.clear(); last.clear() }
+    @Synchronized fun clear(){pending.clear()}
 }
 
 data class DiscordBotStatus(val state:String, val message:String, val inviteUrl:String?, val guilds:List<Map<String,String>>)
@@ -241,10 +233,15 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
     @Scheduled(fixedDelay=2000) fun sendAlerts() {
         val jda=client
         if(jda==null || jda.status!=JDA.Status.CONNECTED || !view().config.enabled) { alerts.clear();return }
-        alerts.drain(System.currentTimeMillis()).forEach { (signal,count) ->
+        alerts.drain().forEach { (signal,count) ->
             val name=runCatching { manager.instance(signal.instanceId).name }.getOrNull() ?: return@forEach
-            view().config.alerts.filter { it.instanceId==signal.instanceId && it.accepts(signal.kind) }
-                .forEach { route ->
+            val routes=view().config.alerts.filter { it.instanceId==signal.instanceId && it.accepts(signal) }
+            if(routes.isEmpty())return@forEach
+            val report=signal.exit?.crashReport
+            val reportBytes=report?.let {CrashReports.attachment(manager.serverDir(signal.instanceId),it)}
+            val reportSummary=reportBytes?.let {DiscordErrorBuffer.fromReport(it)}
+            val summary=reportSummary ?: signal.error
+            routes.forEach { route ->
                     // Channel lookup is scoped to the configured guild, never a globally supplied channel ID.
                     val channel=jda.getGuildById(route.guildId)?.getTextChannelById(route.channelId)
                     if(channel==null) { message="알림 채널을 찾을 수 없습니다. 서버·텍스트 채널 ID와 봇 권한을 확인하세요.";return@forEach }
@@ -260,16 +257,18 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
                         errorTimes.remove(signal.instanceId)
                     }
                     val title=if(signal.kind=="start") "🟢 서버 시작 완료" else if(signal.kind=="error") "⚠️ 오류 감지" else if(signal.exit?.requested==false||signal.detail.contains("예기치")) "🛑 비정상 종료" else "⏹ 서버 종료"
-                    val report=signal.exit?.crashReport
                     val canAttach=channel.guild.selfMember.hasPermission(channel,net.dv8tion.jda.api.Permission.MESSAGE_ATTACH_FILES)
-                    val attachment=report?.takeIf {canAttach}?.let {CrashReports.attachment(manager.serverDir(signal.instanceId),it)}
+                    val attachment=reportBytes?.takeIf {canAttach}
                     val restart=(manager.view(signal.instanceId)["autoRestart"] as? AutoRestartStatus)?.takeIf {signal.kind=="stop"&&it.config.enabled}
                     val restartText=restart?.let {if(it.remainingSeconds!=null)"\n자동 재시작 대기: 파일·클라우드 인계 완료 후 ${it.remainingSeconds}초 이내 (최대 3회/10분)." else if(it.message!=null)"\n${it.message}" else ""}.orEmpty()
                     val reportText=if(report!=null&&!canAttach)"\n크래시 리포트를 보내려면 봇에 파일 첨부 권한을 허용하세요. 관리 웹의 로그 파일에서도 확인할 수 있습니다." else if(report!=null&&attachment==null)"\n크래시 리포트가 8 MiB를 넘거나 읽을 수 없어 첨부하지 못했습니다. 관리 웹의 로그 파일에서 확인하세요." else ""
-                    val embed=EmbedBuilder().setTitle("$title · ${name.take(80)}")
+                    val embedBuilder=EmbedBuilder().setTitle("$title · ${name.take(80)}")
                         .setDescription((signal.detail+restartText+reportText+(if(count>1) "\n같은 종류의 알림 ${count}건을 묶었습니다." else "")).take(1500))
                         .setColor(if(signal.kind=="start") Color(0x4caf83) else if(signal.kind=="error" || signal.exit?.requested==false || signal.detail.contains("예기치")) Color(0xd85c55) else Color(0x5f8bb5))
-                        .setTimestamp(Instant.now()).build()
+                        .setTimestamp(Instant.now())
+                    summary?.fields()?.forEach {(label,value)->embedBuilder.addField(label,value,false)}
+                    if(summary!=null)embedBuilder.setFooter(if(reportSummary!=null)"크래시 리포트 요약" else "종료 직전 로그 요약")
+                    val embed=embedBuilder.build()
                     val action=channel.sendMessageEmbeds(embed).setAllowedMentions(emptyList())
                     if(attachment!=null)action.addFiles(net.dv8tion.jda.api.utils.FileUpload.fromData(attachment,report!!))
                     action.queue({ sent ->
