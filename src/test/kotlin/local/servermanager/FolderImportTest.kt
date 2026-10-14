@@ -56,6 +56,16 @@ class FolderImportTest {
             val size=20L*1024*1024*1024
             manager.folderImportProgress(instance.id,"runner",ticket,FolderImportProgress("UPLOADING",800,12L*1024*1024*1024,1200,size))
             assertEquals(size,(manager.view(instance.id)["folderImport"] as FolderImportProgress).totalBytes)
+            manager.beginTransferProgress(instance.id,12L*1024*1024*1024)
+            manager.runnerFolderProgress(instance.id,"runner",ticket,FolderImportProgress("UPLOADING",100,1024,1200,size))
+            assertEquals(800,(manager.view(instance.id)["folderImport"] as FolderImportProgress).files)
+            assertEquals(12L*1024*1024*1024,(manager.view(instance.id)["folderImport"] as FolderImportProgress).bytes)
+            manager.runnerFolderProgress(instance.id,"runner",ticket,FolderImportProgress("RETRYING",message="연결 대기"))
+            val waiting=manager.view(instance.id)["folderImport"] as FolderImportProgress
+            assertEquals(800,waiting.files);assertEquals("RETRYING",waiting.phase);assertEquals(0.0,waiting.bytesPerSecond)
+            manager.folderImportProgress(instance.id,"runner",ticket,waiting.copy(phase="UPLOADING",files=900))
+            manager.runnerFolderProgress(instance.id,"runner",ticket,FolderImportProgress("SCANNING",50,100))
+            assertEquals(900,(manager.view(instance.id)["folderImport"] as FolderImportProgress).files)
             manager.remoteDisconnected("runner");assertEquals("UNKNOWN",manager.view(instance.id)["state"])
             manager.checkFolderImport(instance.id,"runner",ticket)
             manager.remoteCommitted(instance.id,"runner",ticket)

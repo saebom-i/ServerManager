@@ -308,7 +308,9 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
             val errors=errorFrequency(route.instanceId)
             val name=(state["config"] as Instance).name
             val power=state["powerSaving"] as? PowerStatus
-            val finger="$status:${uptime?.div(60)}:${players?.count}:${players?.names}:${errors}:${power?.config}:${power?.status}:${power?.remainingSeconds?.div(60)}:${power?.lastStopReason}"
+            val transfer=(state["fileTransfer"] ?: state["folderImport"]) as? FolderImportProgress
+            val transferText=transfer?.let(TransferDisplay::text)
+            val finger="$transferText:$status:${uptime?.div(60)}:${players?.count}:${players?.names}:${errors}:${power?.config}:${power?.status}:${power?.remainingSeconds?.div(60)}:${power?.lastStopReason}"
             val embed=EmbedBuilder().setTitle("🎮 ${name.take(80)} · 서버 제어")
                 .setColor(if(status=="RUNNING") Color(0x4caf83) else if(status=="FAILED") Color(0xd85c55) else Color(0x697c93))
                 .addField("상태",stateLabel(status),true)
@@ -317,6 +319,7 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
                 .addField("접속 인원",players?.let { "${it.count}명" } ?: "알 수 없음",true)
                 .addField("플레이어",players?.names?.take(30)?.joinToString(", ")?.take(1000)?.ifBlank { "없음" } ?: "알 수 없음",false)
                 .addField("무인 절전",power?.let(::powerLabel) ?: "꺼짐",false)
+                .apply {if(transferText!=null)addField("서버 파일 전송",transferText,false)}
                 .setFooter("Server Manager · ${route.instanceId.take(8)}")
                 .setTimestamp(Instant.now()).build()
             val buttons=listOf(
@@ -359,7 +362,7 @@ class DiscordBot(private val manager:ServerManager, private val audit:AuditLog, 
         }, { if(client!=null) message="전용 채널을 읽지 못했습니다. 메시지 기록 보기 권한을 확인하세요." })
     }
     @PreDestroy fun close() { generation.incrementAndGet();signalSubscription.close();alerts.clear();client?.shutdownNow();client=null;lifecycle.shutdownNow() }
-    private fun stateLabel(value:String)=mapOf("NEW" to "설치 필요","STOPPED" to "정지됨","STARTING" to "시작 중","RUNNING" to "실행 중","STOPPING" to "종료 중","FAILED" to "오류","INSTALLING" to "설치 중","IMPORTING" to "가져오는 중","IMPORT_FAILED" to "가져오기 실패")[value] ?: value
+    private fun stateLabel(value:String)=mapOf("NEW" to "설치 필요","STOPPED" to "정지됨","STARTING" to "시작 중","RUNNING" to "실행 중","STOPPING" to "종료 중","FAILED" to "오류","INSTALLING" to "설치 중","IMPORTING" to "가져오는 중","IMPORT_FAILED" to "가져오기 실패","TRANSFERRING" to "파일 전송 중","SYNCING" to "파일 인계 중","SYNC_FAILED" to "인계 재시도 대기","UNKNOWN" to "연결 확인 중")[value] ?: value
 }
 
 @RestController

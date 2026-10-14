@@ -6,23 +6,24 @@ import kotlin.test.*
 class ModSearchTest {
     private fun mod(id:String,vararg deps:String)=InstalledMod("$id.jar",true,10,id,id,ModArchiveInfo("fabric",listOf(ModIdentity(id,"1",id)),deps.map {ModRequirement(id,it,listOf("*"),"required")}))
     private fun graph(vararg mods:InstalledMod)=ModGraph(ModInventorySnapshot("r",mods.toList(),emptyList()))
-    @Test fun `dependencies aliases transitive protection and reverse dependent removal`() {
+    @Test fun `dependency providers stay enabled while their dependent mods can be disabled`() {
         val lib=mod("lib").let {it.copy(metadata=it.metadata!!.copy(mods=listOf(ModIdentity("lib","1","Library",setOf("alias")))))}
         val g=graph(mod("main","alias"),lib,mod("extra","main"),mod("other"))
-        assertEquals(setOf("main.jar","lib.jar","extra.jar"),g.disable(setOf("lib.jar")))
+        assertFailsWith<IllegalArgumentException>{g.disable(setOf("lib.jar"))}
+        assertEquals(listOf("main.jar"),g.dependencyReasons["lib.jar"])
+        assertEquals(setOf("extra.jar"),g.disable(setOf("extra.jar")))
         val p=g.plan(setOf("lib.jar","main.jar","other.jar"),setOf("main.jar"))
         assertEquals(listOf("lib.jar","main.jar"),p.protectedSuspects)
         assertEquals(listOf("other.jar"),p.groups.single().files)
         assertEquals(setOf("other.jar"),g.disabled(p,emptySet()))
     }
-    @Test fun `candidate dependencies through nonsuspects and cycles form inseparable groups`() {
+    @Test fun `all transitive providers and cross-file cycles are fixed even if selected as suspects`() {
         val g=graph(mod("a","bridge"),mod("bridge","b"),mod("b","a"),mod("c"),mod("addon","c"))
-        val p=g.plan(setOf("a.jar","b.jar","c.jar"),emptySet())
-        assertEquals(2,p.groups.size)
-        assertEquals(setOf("a.jar","b.jar"),p.groups.first {"a.jar" in it.files}.files.toSet())
-        val c=p.groups.first {"c.jar" in it.files}
-        assertEquals(listOf("addon.jar"),c.companions)
-        assertEquals(setOf("c.jar","addon.jar"),g.disabled(p,p.groups.map {it.id}.toSet()-c.id))
+        val p=g.plan(setOf("a.jar","b.jar","c.jar","addon.jar"),emptySet())
+        assertEquals(listOf("addon.jar"),p.groups.single().files)
+        assertEquals(setOf("a.jar","b.jar","bridge.jar","c.jar"),p.fixed.toSet())
+        assertEquals(setOf("addon.jar"),g.disabled(p,emptySet()))
+        assertFails {g.disable(setOf("c.jar","addon.jar"))}
     }
     @Test fun `missing and unknown dependencies block automatic modification`() {
         val missing=graph(mod("a","missing"));assertFails {missing.plan(setOf("a.jar"),emptySet())}

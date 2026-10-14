@@ -59,6 +59,8 @@ class RuntimeState {
     @Volatile var idleCheckPending=false
     var idleRequestId:String?=null
     var idleRequestAt=0L
+    val transferMeter=TransferMeter()
+    var transferAuthoritative=false
     var folderSource:Map<String,String>?=null
     var folderImport:FolderImportProgress?=null
     var fileTransfer:FolderImportProgress?=null
@@ -198,7 +200,7 @@ class ServerManager {
     fun view(id: String): Map<String, Any?> {
         val i = instance(id); val r = runtime(id)
         val result=synchronized(r) { mapOf("config" to i.copy(), "state" to r.state, "pid" to (if(i.runnerId!=null) r.remotePid else r.process?.takeIf { it.isAlive }?.pid()), "resources" to r.resources?.takeIf { (i.runnerId!=null || r.process?.isAlive == true) && (i.runnerId!=null || it.pid == r.process?.pid()) }, "players" to r.players?.takeIf { r.state=="RUNNING" && java.time.Duration.between(Instant.parse(it.sampledAt),Instant.now()).seconds<30 }, "directory" to serverDir(id).toString(), "eulaAccepted" to eulaAccepted(id),"activityVersion" to r.activityVersion,"diagnosticActive" to r.diagnosticActive,"modBusy" to r.modBusy) }
-        val transfer=synchronized(r) {mapOf("folderSource" to r.folderSource,"folderImport" to r.folderImport,"fileTransfer" to r.fileTransfer)}
+        val transfer=synchronized(r) {mapOf("folderSource" to r.folderSource,"folderImport" to r.folderImport?.let(r.transferMeter::view),"fileTransfer" to r.fileTransfer?.let(r.transferMeter::view))}
         return result+transfer+mapOf("powerSaving" to powerStatus?.invoke(id),"autoRestart" to autoRestartStatus?.invoke(id))
     }
     private fun validate(req: CreateRequest) {
@@ -300,7 +302,7 @@ class ServerManager {
             checkIdle(r);val runner=i.runnerId ?: error("기존 폴더를 등록한 실행기를 선택하세요")
             val previous=r.state;val request=UUID.randomUUID().toString()
             folderImportMarker(id).writeText(request);root.resolve(id).resolve("remote-lease").writeText(runner)
-            r.state="IMPORTING";r.fileTransfer=null;r.folderImport=FolderImportProgress("SCANNING",message="실행기의 기존 폴더를 확인하고 있습니다")
+            r.state="IMPORTING";r.fileTransfer=null;r.transferAuthoritative=false;r.transferMeter.reset();r.folderImport=FolderImportProgress("SCANNING",message="실행기의 기존 폴더를 확인하고 있습니다")
             try {(remoteController ?: error("실행기 연결을 확인하세요")).importFolder(i.copy(),request)}
             catch(e:Exception){folderImportMarker(id).deleteIfExists();root.resolve(id).resolve("remote-lease").deleteIfExists();r.state=previous;r.folderImport=FolderImportProgress("FAILED",message=e.message.orEmpty());throw e}
             r.event("system","Minecraft를 실행하지 않고 기존 서버 폴더를 가져옵니다")
@@ -322,13 +324,28 @@ class ServerManager {
         if(instance(id).runnerId!=runner || state !in setOf("PENDING","SYNCED","INVALID"))return
         val r=runtime(id);synchronized(r){r.folderSource=mapOf("state" to state,"path" to path.orEmpty().take(1000))}
     }
+    fun beginTransferProgress(id:String,bytes:Long){val r=runtime(id);synchronized(r){r.transferAuthoritative=true;r.transferMeter.reset(bytes)}}
+    fun runnerFolderProgress(id:String,runner:String,request:String,progress:FolderImportProgress) {
+        val r=runtime(id);synchronized(r){
+            if(r.transferAuthoritative && progress.phase in setOf("SCANNING","UPLOADING","VERIFYING"))return
+            val current=if(progress.phase=="RETRYING")r.folderImport?.copy(phase="RETRYING",message=progress.message) ?: progress else progress
+            folderImportProgress(id,runner,request,current)
+        }
+    }
+    fun runnerFileProgress(id:String,runner:String,progress:FolderImportProgress) {
+        val r=runtime(id);synchronized(r){
+            if(r.transferAuthoritative && progress.phase in setOf("SCANNING","UPLOADING","VERIFYING"))return
+            val current=if(progress.phase=="RETRYING")r.fileTransfer?.copy(phase="RETRYING",message=progress.message) ?: progress else progress
+            fileTransferProgress(id,runner,current)
+        }
+    }
     fun folderImportProgress(id:String,runner:String,request:String,progress:FolderImportProgress) {
-        val r=runtime(id);synchronized(r){checkFolderImport(id,runner,request);r.folderImport=progress.validated();r.state="IMPORTING"}
+        val r=runtime(id);synchronized(r){checkFolderImport(id,runner,request);r.folderImport=progress.validated();r.transferMeter.observe(progress);r.state="IMPORTING"}
     }
     fun fileTransferProgress(id:String,runner:String,progress:FolderImportProgress) {
         val r=runtime(id);synchronized(r) {
             if(instance(id).runnerId!=runner || r.state !in setOf("TRANSFERRING","SYNCING","SYNC_FAILED","UNKNOWN") || !root.resolve(id).resolve("remote-lease").exists())return
-            r.fileTransfer=progress.validated()
+            r.fileTransfer=progress.validated();r.transferMeter.observe(progress)
         }
     }
     fun folderImportFailed(id:String,runner:String,request:String,detail:String?) {
@@ -347,7 +364,7 @@ class ServerManager {
             checkIdle(r,true);check(if(r.diagnosticActive)session!=null && session==r.diagnosticSession else session==null) {"모드 검사 패널에서 다음 시도를 준비하고 시작하세요"}; require(r.state != "IMPORT_FAILED") { "실패한 팩은 시작할 수 없습니다. 원본 mrpack에서 다시 가져오세요" }; require(eulaAccepted(id)) { "Minecraft EULA에 먼저 동의하세요" }
             r.activityVersion++;r.stopReason=null;r.idleCheckPending=false;r.idleRequestId=null
             r.discordError.clear();r.exitError=null;r.exitErrorCaptured=false;r.startNotified=false;r.exitReport=null;r.lastExit=null;r.remoteCloudReady=false;r.remoteWorkerReady=false
-            r.fileTransfer=null
+            r.fileTransfer=null;r.transferAuthoritative=false;r.transferMeter.reset()
             if(i.runnerId!=null) {
                 val controller=remoteController ?: error("원격 실행기 연결 기능을 사용할 수 없습니다")
                 root.resolve(id).resolve("remote-lease").writeText(i.runnerId!!)

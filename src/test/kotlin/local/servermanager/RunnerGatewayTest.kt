@@ -16,6 +16,23 @@ import java.util.Collections
 import kotlin.test.*
 
 class RunnerGatewayTest {
+    @Test fun `heartbeat replies keep long uploads alive and stale sessions cannot renew them`() {
+        val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java)
+        `when`(registry.active("runner")).thenReturn(RunnerDevice("runner","fixture","MAC","user","key","now"))
+        val sent=mutableListOf<WebSocketMessage<*>>()
+        fun session()=mock(WebSocketSession::class.java).also {s->
+            `when`(s.attributes).thenReturn(mutableMapOf<String,Any>("runnerId" to "runner"));`when`(s.isOpen).thenReturn(true)
+            doAnswer {sent.add(it.arguments[0] as WebSocketMessage<*>);null}.`when`(s).sendMessage(any())
+        }
+        val gateway=RunnerGateway(registry,manager);val old=session();gateway.afterConnectionEstablished(old)
+        val current=session();gateway.afterConnectionEstablished(current);sent.clear()
+        gateway.handleMessage(old,TextMessage("{\"type\":\"heartbeat\",\"version\":\"0.4.0-beta.8\"}"))
+        assertTrue(sent.isEmpty())
+        gateway.handleMessage(current,TextMessage("{\"type\":\"heartbeat\",\"version\":\"0.4.0-beta.8\"}"))
+        val reply=jacksonObjectMapper().readValue<RunnerMessage>((sent.single() as TextMessage).payload)
+        assertEquals("heartbeat-ack",reply.type)
+        verify(registry).seen("runner","0.4.0-beta.8")
+    }
     @Test fun `diagnostics reject old runners before sending start and carry isolated context on new runners`() {
         val manager=mock(ServerManager::class.java);val registry=mock(RunnerRegistry::class.java)
         val instance=Instance("a","A",loaderVersion="21.1.252",port=ServerSocket(0).use {it.localPort},memoryMb=512,javaPath="java",runnerId="runner",diagnosticSession=java.util.UUID.randomUUID().toString())

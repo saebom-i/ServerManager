@@ -41,15 +41,16 @@ class ModManagementTest {
     @Test fun `disable is dependency closed reversible content preserving and stale revision guarded`()=fixture {manager,mods,id->
         val source=manager.originalServerDir(id);val original=FileInventory.collect(source)
         val revision=mods.page(id).inventory!!.revision
-        val request=ModSelection(revision,setOf("lib.jar"))
-        assertEquals(listOf("lib.jar","suspect.jar"),mods.preview(id,request).affected)
+        assertFails {mods.preview(id,ModSelection(revision,setOf("lib.jar")))}
+        val request=ModSelection(revision,setOf("suspect.jar"))
+        assertEquals(listOf("suspect.jar"),mods.preview(id,request).affected)
         mods.toggle(id,request);waitJob(mods,id)
-        assertFalse(source.resolve("mods/lib.jar").exists());assertTrue(source.resolve("mods/suspect.jar.disabled").exists())
+        assertTrue(source.resolve("mods/lib.jar").exists());assertTrue(source.resolve("mods/suspect.jar.disabled").exists())
         assertEquals("untouched",source.resolve("world/region/r.0.0.mca").readText())
         assertFails {mods.toggle(id,request)}
         var fresh=mods.page(id).inventory!!
-        assertFails {mods.preview(id,ModSelection(fresh.revision,setOf("suspect.jar.disabled"),true))}
-        mods.toggle(id,ModSelection(fresh.revision,setOf("lib.jar.disabled","suspect.jar.disabled"),true));waitJob(mods,id)
+        assertEquals(listOf("suspect.jar.disabled"),mods.preview(id,ModSelection(fresh.revision,setOf("suspect.jar.disabled"),true)).affected)
+        mods.toggle(id,ModSelection(fresh.revision,setOf("suspect.jar.disabled"),true));waitJob(mods,id)
         assertEquals(original,FileInventory.collect(source));assertFalse(manager.root.resolve(id).resolve("import.pending").exists())
         jar(source.resolve("mods/external.jar.disabled"),"external");mods.refresh(id);waitJob(mods,id);fresh=mods.page(id).inventory!!
         assertFails {mods.preview(id,ModSelection(fresh.revision,setOf("external.jar.disabled"),true))}

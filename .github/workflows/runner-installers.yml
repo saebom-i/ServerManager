@@ -26,4 +26,4 @@ jobs:
       - run: python scripts/test-runner-setup.py
       - name: Verify file handoff and recovery
         shell: bash
-        run: ./gradlew test --tests local.servermanager.DeltaTransferTest --tests local.servermanager.RunnerTransferTest --tests local.servermanager.RunnerFoldersTest --tests local.servermanager.ModSearchTest --tests local.servermanager.ModArtifactsTest --tests local.servermanager.NestedModsTest --no-daemon
+        run: ./gradlew test --tests local.servermanager.DeltaTransferTest --tests local.servermanager.RunnerTransferTest --tests local.servermanager.RunnerFoldersTest --tests local.servermanager.TransferMeterTest --tests local.servermanager.ModSearchTest --tests local.servermanager.ModArtifactsTest --tests local.servermanager.NestedModsTest --no-daemon

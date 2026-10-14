@@ -9,7 +9,7 @@ import kotlin.io.path.*
 
 data class InstalledMod(val filename:String,val enabled:Boolean,val size:Long,val sha256:String,val sha512:String,
     val metadata:ModArchiveInfo?,val warning:String?=null)
-data class ModInventorySnapshot(val revision:String,val mods:List<InstalledMod>,val warnings:List<String>)
+data class ModInventorySnapshot(val revision:String,val mods:List<InstalledMod>,val warnings:List<String>,val dependencyFiles:List<String> = emptyList(),val dependencyReasons:Map<String,List<String>> = emptyMap())
 data class ModContentLink(val filename:String,val version:RinVersion,val file:RinFile)
 
 /** An explicit, read-only scan. Do not call from periodic status/UI polling. */
@@ -48,7 +48,9 @@ object ModInventory {
             providers.filter {it.value.size>1}.keys.sorted().forEach {add("모드 ID 중복: $it")}
             if(active.any {it.metadata?.complete!=true})add("알 수 없거나 중첩된 모드 의존성이 있습니다. 자동 비활성화는 아직 안전하지 않습니다")
         }
-        return ModInventorySnapshot(hex(revision.digest()),mods,warnings)
+        val snapshot=ModInventorySnapshot(hex(revision.digest()),mods,warnings)
+        val graph=runCatching {ModGraph(snapshot)}.getOrNull()
+        return snapshot.copy(dependencyFiles=graph?.dependencyFiles?.sorted().orEmpty(),dependencyReasons=graph?.dependencyReasons.orEmpty())
     }
     /** A content match never uses the local filename as proof of identity. */
     fun link(snapshot:ModInventorySnapshot,lookup:(List<String>)->Map<String,RinVersion>):List<ModContentLink> {

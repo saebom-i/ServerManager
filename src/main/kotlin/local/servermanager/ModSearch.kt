@@ -13,8 +13,10 @@ class ModGraph(snapshot:ModInventorySnapshot) {
         requirements=active.mapValues {(_,f)->f.metadata!!.takeUnless {it.clientOnly}?.requirements.orEmpty().filter {it.kind=="required" && it.id !in platform}.flatMap {d->
             if(providers[d.id].isNullOrEmpty())missing.getOrPut(f.filename){mutableSetOf()}.add(d.id)
             providers[d.id].orEmpty()
-        }.toSet()}
+        }.toSet()-f.filename}
     }
+    val dependencyReasons:Map<String,List<String>> get()=requirements.entries.flatMap {(owner,deps)->deps.map {it to owner}}.groupBy({it.first},{it.second}).mapValues {it.value.sorted()}
+    val dependencyFiles:Set<String> get()=dependencyReasons.keys
     fun validateEnabled(files:Set<String> = active.keys) {
         val unresolved=missing.filterKeys {it in files}
         require(unresolved.isEmpty()) {unresolved.entries.joinToString(" · "){"${it.key}: 필수 모드 ${it.value.joinToString()}가 없습니다"}}
@@ -27,15 +29,14 @@ class ModGraph(snapshot:ModInventorySnapshot) {
     }
     fun disable(files:Set<String>):Set<String> {
         require(files.isNotEmpty() && files.all {it in active}) {"비활성화할 모드를 선택하세요"}
-        val disabled=files.toMutableSet()
-        do {val before=disabled.size;requirements.forEach {(f,deps)->if(deps.any {it in disabled})disabled.add(f)}} while(disabled.size!=before)
-        validateEnabled(active.keys-disabled)
-        return disabled
+        require(files.intersect(dependencyFiles).isEmpty()) {"다른 활성 모드가 필수로 사용하는 의존성 모드는 비활성화할 수 없습니다: ${files.intersect(dependencyFiles).sorted().joinToString()}"}
+        validateEnabled(active.keys-files)
+        return files
     }
     fun plan(suspects:Set<String>,keep:Set<String>):ModSearchPlan {
         require(suspects.isNotEmpty() && suspects.all {it in active}) {"검사할 의심 모드를 선택하세요"}
         validateEnabled()
-        val fixed=closure(keep)
+        val fixed=closure(keep+dependencyFiles)
         val candidates=(suspects-fixed).sorted()
         require(candidates.isNotEmpty()) {"선택한 모드는 모두 유지 모드 또는 필수 의존성입니다"}
         val groups=mutableListOf<MutableSet<String>>()
@@ -47,7 +48,7 @@ class ModGraph(snapshot:ModInventorySnapshot) {
         // A late merge can join earlier groups through a transitive provider.
         var changed=true
         while(changed){changed=false;outer@for(a in groups.indices)for(b in a+1 until groups.size)if(groups[a].intersect(groups[b]).isNotEmpty()){groups[a].addAll(groups.removeAt(b));changed=true;break@outer}}
-        return ModSearchPlan(active.keys.sorted(),suspects.sorted(),fixed.sorted(),(suspects intersect fixed).sorted(),groups.sortedBy {it.min()}.mapIndexed {n,g->ModSearchGroup("g${n+1}",g.sorted(),(disable(g)-g).sorted())})
+        return ModSearchPlan(active.keys.sorted(),suspects.sorted(),fixed.sorted(),(suspects intersect fixed).sorted(),groups.sortedBy {it.min()}.mapIndexed {n,g->ModSearchGroup("g${n+1}",g.sorted())})
     }
     fun disabled(plan:ModSearchPlan,enabledGroups:Set<String>):Set<String> {
         require(enabledGroups.all {g->plan.groups.any {it.id==g}})
@@ -57,7 +58,7 @@ class ModGraph(snapshot:ModInventorySnapshot) {
         return disabled
     }
 }
-data class ModSearchGroup(val id:String,val files:List<String>,val companions:List<String> = emptyList())
+data class ModSearchGroup(val id:String,val files:List<String>)
 data class ModSearchPlan(val original:List<String>,val suspects:List<String>,val fixed:List<String>,val protectedSuspects:List<String>,val groups:List<ModSearchGroup>)
 data class SearchObservation(val groups:List<String>,val verdict:String)
 data class SearchStep(val status:String,val groups:List<String>,val message:String)

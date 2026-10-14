@@ -1,9 +1,10 @@
 import {test,expect} from '@playwright/test';
-import {readFile,writeFile,access,open,cp,mkdir,rename,rm,readdir,realpath} from 'node:fs/promises';
+import {readFile,writeFile,access,open,cp,mkdir,rename,rm,readdir,realpath,stat} from 'node:fs/promises';
 import {spawn,execFile, type ChildProcess} from 'node:child_process';
 import net from 'node:net';
 import {promisify} from 'node:util';
-import {createHash} from 'node:crypto';
+import {createHash,createPrivateKey,sign,randomBytes} from 'node:crypto';
+import tls from 'node:tls';
 
 function varint(n:number){const bytes:number[]=[];do{let b=n&127;n>>>=7;if(n)b|=128;bytes.push(b);}while(n);return Buffer.from(bytes);}
 async function freePort(){const socket=net.createServer();await new Promise<void>(r=>socket.listen(0,'127.0.0.1',r));const port=(socket.address() as net.AddressInfo).port;await new Promise<void>(r=>socket.close(()=>r()));return port;}
@@ -14,6 +15,14 @@ async function query(port:number,host:string){return new Promise<any>((resolve,r
  socket.on('connect',()=>{const h=Buffer.from(host);const p=Buffer.concat([varint(0),varint(767),varint(h.length),h,Buffer.from([port>>8,port&255]),varint(1)]);socket.write(Buffer.concat([varint(p.length),p,Buffer.from([1,0])]));});
  socket.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);let offset=0;function read(){let n=0;for(let i=0;i<5;i++){if(offset>=bytes.length)throw Error('partial');const b=bytes[offset++];n|=(b&127)<<(7*i);if(!(b&128))return n;}throw Error('bad varint');}try{const length=read();if(bytes.length-offset<length)return;expect(read()).toBe(0);const size=read();finish(undefined,JSON.parse(bytes.subarray(offset,offset+size).toString()));}catch(e){if((e as Error).message!=='partial')finish(e as Error);}});
  });}
+async function rotateFixtureRunnerSession(home:string){
+ const device=JSON.parse(await readFile(home+'/identity.json','utf8'));const time=Date.now(),nonce=randomBytes(24).toString('base64url');
+ const key=createPrivateKey({key:Buffer.from(device.privateKey,'base64url'),format:'der',type:'pkcs8'});
+ const signature=sign(null,Buffer.from(`sm-runner-v1\n${device.id}\n${time}\n${nonce}\n`),key).toString('base64url');
+ await new Promise<void>((resolve,reject)=>{let result='';const socket=tls.connect({host:'127.0.0.1',servername:'localhost',port:8796,rejectUnauthorized:false},()=>{
+  socket.write(`GET /api/runners/connect HTTP/1.1\r\nHost: localhost:8796\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nX-SM-Runner-Id: ${device.id}\r\nX-SM-Timestamp: ${time}\r\nX-SM-Nonce: ${nonce}\r\nX-SM-Signature: ${signature}\r\n\r\n`);
+ });socket.setTimeout(10000,()=>{socket.destroy();reject(Error('fixture replacement WSS timeout'));});socket.on('error',reject);socket.on('data',chunk=>{result+=chunk.toString();if(result.includes('\r\n\r\n')){const ok=result.startsWith('HTTP/1.1 101');socket.destroy();ok?resolve():reject(Error('fixture replacement WSS was rejected'));}});});
+}
 test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe failed start and stop handoff',async({page,context,browser})=>{
  const home=process.env.SM_RUNNERS_TEST_HOME||'';expect(home.startsWith('/tmp/servermanager-runners.')).toBe(true);
  const java=process.env.SM_RUNNERS_TEST_JAVA!,jar=process.env.SM_RUNNERS_TEST_JAR!;
@@ -48,6 +57,7 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
     await rename(originalFolder+'/server.jar',originalFolder+'/custom-vanilla.jar');
     await rm(originalFolder+'/server-manager-runtime.json');
     await writeFile(originalFolder+'/original-folder-proof.txt','must remain in the original folder\n');
+    await writeFile(originalFolder+'/resume-proof.bin',Buffer.alloc(64*1024*1024,37));
     await mkdir(runnerHome+'/instances/'+id,{recursive:true});
     await writeFile(runnerHome+'/instances/'+id+'/server-folder.properties',`path=${await realpath(originalFolder)}\ninitial=true\njar=custom-vanilla.jar\nrequiredJava=21\n`);
    }
@@ -61,7 +71,15 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
    await expect.poll(async()=> (await api('/runners')).find((d:any)=>d.id===device)?.online,{timeout:30000}).toBe(true);
   }
   // Import an already-bound original folder before launching any Minecraft process.
-  await api('/instances/'+ids[0]+'/import-folder','POST');await waitState(ids[0],'STOPPED');
+  await api('/instances/'+ids[0]+'/import-folder','POST');
+  const cacheRoot=home+'/profiles/'+ids[0]+'/runner-transfer';let resumedId='';
+  await expect.poll(async()=>{try{const names=await readdir(cacheRoot);resumedId=names.find(n=>/^[a-f0-9-]{36}$/.test(n))||'';if(!resumedId)return false;const files=await readdir(cacheRoot+'/'+resumedId,{recursive:true});for(const file of files){const info=await stat(cacheRoot+'/'+resumedId+'/'+file);if(info.isFile()&&info.size>=4*1024*1024)return true;}return false;}catch{return false;}},{timeout:120000,intervals:[10,20,30]}).toBe(true);
+  await rotateFixtureRunnerSession(runnerHomes[0]);await waitState(ids[0],'STOPPED');
+  await access(home+'/profiles/'+ids[0]+'/transfer-receipts/'+resumedId+'.json');
+  const audit=(await readFile(home+'/profiles/security/audit.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(audit.filter((e:any)=>e.action==='POST /api/runners/transfer/'+ids[0]+'/begin').length).toBeGreaterThanOrEqual(2);
+  expect(await readFile(home+'/profiles/'+ids[0]+'/server/resume-proof.bin')).toEqual(Buffer.alloc(64*1024*1024,37));
+  console.log('PASS: forced signed WSS authentication replacement during live upload preserves transfer ID, received chunks and exact bytes.');
   const imported=(await api('/instances')).find((r:any)=>r.config.id===ids[0]);
   expect(imported.folderImport.phase).toBe('COMPLETE');expect(imported.pid).toBeNull();
   expect(await readFile(home+'/profiles/'+ids[0]+'/server/original-folder-proof.txt','utf8')).toContain('original folder');
@@ -132,13 +150,14 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   const modPage=()=>api(modBase+'?inventory=true');
   const waitMod=async()=>{await expect.poll(async()=> (await modPage()).job?.phase,{timeout:60000}).toBe('COMPLETE');};
   await api(modBase+'/refresh','POST');await waitMod();let inventory=(await modPage()).inventory;
-  const preview=await api(modBase+'/toggle-preview','POST',{revision:inventory.revision,files:['library.jar'],enabled:false});expect(preview.affected).toEqual(['library.jar','suspect.jar']);
-  expect((await page.request.post('/api'+modBase+'/toggle',{data:{revision:inventory.revision,files:['library.jar'],enabled:false}})).status()).toBe(403);
-  await api(modBase+'/toggle','POST',{revision:inventory.revision,files:['library.jar'],enabled:false});await waitMod();inventory=(await modPage()).inventory;
-  expect(inventory.mods.filter((m:any)=>!m.enabled).map((m:any)=>m.filename)).toEqual(['library.jar.disabled','suspect.jar.disabled']);
-  await api(modBase+'/toggle','POST',{revision:inventory.revision,files:['library.jar.disabled','suspect.jar.disabled'],enabled:true});await waitMod();
+  const preview=await api(modBase+'/toggle-preview','POST',{revision:inventory.revision,files:['suspect.jar'],enabled:false});expect(preview.affected).toEqual(['suspect.jar']);
+  const blocked=await page.request.post('/api'+modBase+'/toggle-preview',{data:{revision:inventory.revision,files:['library.jar'],enabled:false},headers:{'X-CSRF-TOKEN':session.csrf}});expect(blocked.status()).toBe(400);expect(await blocked.text()).toContain('suspect.jar');
+  expect((await page.request.post('/api'+modBase+'/toggle',{data:{revision:inventory.revision,files:['suspect.jar'],enabled:false}})).status()).toBe(403);
+  await api(modBase+'/toggle','POST',{revision:inventory.revision,files:['suspect.jar'],enabled:false});await waitMod();inventory=(await modPage()).inventory;
+  expect(inventory.mods.filter((m:any)=>!m.enabled).map((m:any)=>m.filename)).toEqual(['suspect.jar.disabled']);
+  await api(modBase+'/toggle','POST',{revision:inventory.revision,files:['suspect.jar.disabled'],enabled:true});await waitMod();
   await page.getByRole('button',{name:/Fixture Fabric Fabric/}).click();await page.getByRole('button',{name:'모드 · 문제 찾기',exact:true}).click();
-  await page.getByLabel('suspect.jar 의심 모드',{exact:true}).check();await page.getByLabel('other.jar 의심 모드',{exact:true}).check();await page.getByLabel('library.jar 항상 유지',{exact:true}).check();
+  await page.getByLabel('suspect.jar 의심 모드',{exact:true}).check();await page.getByLabel('other.jar 의심 모드',{exact:true}).check();await expect(page.getByLabel('library.jar 항상 유지',{exact:true})).toBeChecked();await expect(page.getByLabel('library.jar 의심 모드',{exact:true})).toBeDisabled();
   await page.getByRole('button',{name:'선택한 2개에서 문제 모드 찾기',exact:true}).click();await waitMod();
   await expect(page.getByRole('button',{name:'이 조합으로 테스트 시작',exact:true})).toBeEnabled();
   const diag=(await modPage()).diagnostic.id,sandbox=home+'/profiles/'+modId+'/diagnostics/'+diag+'/server',runnerSandbox=runnerHomes[1]+'/instances/'+modId+'/diagnostics/'+diag+'/server';

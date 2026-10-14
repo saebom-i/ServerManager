@@ -69,6 +69,9 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
         val event=runCatching { mapper.readValue<RunnerMessage>(message.payload) }.getOrNull() ?: return
         when(event.type) {
             "heartbeat" -> {
+                // Server-to-runner traffic also keeps reverse-proxy read timeouts alive
+                // during a long HTTP upload, when no control command is being sent.
+                send(id,RunnerMessage("heartbeat-ack"))
                 registry.seen(id,event.version?.take(80) ?: "unknown")
                 manager.pendingFolderImports(id).forEach { (instance,request)->runCatching {importFolder(instance,request)} }
             }
@@ -76,9 +79,9 @@ class RunnerGateway(private val registry:RunnerRegistry,private val manager:Serv
                 if(registry.active(id)?.allowedInstanceIds?.contains(instance)==true)runCatching {manager.folderSource(instance,id,event.state.orEmpty(),event.detail)}
             }
             "import-progress" -> if(event.instanceId!=null && event.token!=null && event.detail!=null)runCatching {
-                manager.folderImportProgress(event.instanceId,id,event.token,mapper.readValue<FolderImportProgress>(event.detail))
+                manager.runnerFolderProgress(event.instanceId,id,event.token,mapper.readValue<FolderImportProgress>(event.detail))
             }
-            "file-progress" -> if(event.instanceId!=null && event.detail!=null)runCatching {manager.fileTransferProgress(event.instanceId,id,mapper.readValue<FolderImportProgress>(event.detail))}
+            "file-progress" -> if(event.instanceId!=null && event.detail!=null)runCatching {manager.runnerFileProgress(event.instanceId,id,mapper.readValue<FolderImportProgress>(event.detail))}
             "import-failed" -> if(event.instanceId!=null && event.token!=null)runCatching {manager.folderImportFailed(event.instanceId,id,event.token,event.detail)}
             "idle-result" -> event.instanceId?.let {manager.remoteIdleResult(it,id,event.detail,event.state=="ACCEPTED")}
             "state" -> {

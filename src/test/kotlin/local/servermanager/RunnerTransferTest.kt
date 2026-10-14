@@ -96,4 +96,71 @@ class RunnerTransferTest {
             assertEquals("new",base.resolve("data").readText());assertEquals("new",second.resolve("data").readText())
         } finally {release.countDown();pool.shutdown();assertTrue(pool.awaitTermination(10,java.util.concurrent.TimeUnit.SECONDS))}
     }
+    @Test fun `interrupted chunks resume after manager restart and completed files are not resent`() {
+        val (transfer,base,manager,registry)=fixture()
+        val source=temp.resolve("resume-source").createDirectory()
+        source.resolve("done.txt").writeText("done");source.resolve("partial.txt").writeText("123456789");source.resolve("empty.txt").writeText("")
+        val manifest=FileInventory.collect(source).let {(f,d)->RunnerFileManifest(f,d)}
+        val first=transfer.begin("runner","instance",manifest,resumeProtocol=1)
+        transfer.upload("runner","instance",first.transferId,"done.txt",0,"done".toByteArray())
+        transfer.upload("runner","instance",first.transferId,"partial.txt",0,"1234".toByteArray())
+        val restored=RunnerTransfer(manager,registry)
+        val resume=restored.begin("runner","instance",manifest,resumeProtocol=1)
+        assertEquals(first.transferId,resume.transferId);assertEquals(setOf("partial.txt"),resume.changedFiles)
+        assertEquals(mapOf("partial.txt" to 4L),resume.offsets);assertEquals(8L,resume.completedBytes);assertEquals(2,resume.completedFiles)
+        assertFails {restored.upload("runner","instance",resume.transferId,"partial.txt",0,"wrong".toByteArray())}
+        restored.upload("runner","instance",resume.transferId,"partial.txt",4,"56789".toByteArray());restored.commit("runner","instance",resume.transferId)
+        assertEquals(FileInventory.collect(source),FileInventory.collect(base))
+        assertEquals("COMPLETE",restored.transferState("runner","instance",resume.transferId))
+        RunnerTransfer(manager,registry).commit("runner","instance",resume.transferId)
+        verify(manager,times(1)).remoteCommitted("instance","runner")
+        assertTrue(temp.resolve("instance/runner-transfer").listDirectoryEntries().isEmpty())
+    }
+    @Test fun `old runners reuse completed files and corrupted cached files are requested again`() {
+        val (transfer,_,manager,registry)=fixture()
+        val source=temp.resolve("legacy-resume-source").createDirectory()
+        source.resolve("good").writeText("good");source.resolve("bad").writeText("original");source.resolve("part").writeText("123456")
+        val manifest=FileInventory.collect(source).let {(f,d)->RunnerFileManifest(f,d)}
+        val first=transfer.begin("runner","instance",manifest)
+        transfer.upload("runner","instance",first.transferId,"good",0,"good".toByteArray())
+        transfer.upload("runner","instance",first.transferId,"bad",0,"original".toByteArray())
+        transfer.upload("runner","instance",first.transferId,"part",0,"12".toByteArray())
+        val cache=temp.resolve("instance/runner-transfer/${first.transferId}");cache.resolve("bad").writeText("tampered")
+        val resumed=RunnerTransfer(manager,registry).begin("runner","instance",manifest)
+        assertEquals(setOf("bad","part"),resumed.changedFiles);assertTrue(resumed.offsets.isEmpty())
+        assertEquals(4L,resumed.completedBytes);assertEquals(1,resumed.completedFiles)
+        assertTrue(cache.resolve("good").exists());assertFalse(cache.resolve("part").exists());assertFalse(cache.resolve("bad").exists())
+        cache.resolve("link").toFile().writeText("unrecognized")
+        assertFails {RunnerTransfer(manager,registry).begin("runner","instance",manifest,resumeProtocol=1)}
+    }
+    @Test fun `legacy import cache is adopted only with its current import authorization and hashes`() {
+        val (_,_,manager,registry)=fixture();val root=temp.resolve("instance/runner-transfer").createDirectories()
+        val id=java.util.UUID.randomUUID().toString();val cache=root.resolve(id).createDirectory();cache.resolve("file").writeText("received")
+        val manifest=RunnerFileManifest(mapOf("file" to CloudFile(FileInventory.digest(cache.resolve("file")),8)),emptySet())
+        val transfer=RunnerTransfer(manager,registry)
+        assertFails {transfer.begin("runner","instance",manifest)}
+        val resumed=transfer.begin("runner","instance",manifest,"current-import",1)
+        assertEquals(id,resumed.transferId);assertTrue(resumed.changedFiles.isEmpty());assertEquals(8L,resumed.completedBytes)
+        verify(manager).checkFolderImport("instance","runner","current-import")
+        assertTrue(root.resolve("$id.pending.json").exists())
+    }
+
+    @Test fun `interruption after applying files but before writing receipt reconciles without resending`() {
+        val (transfer,base,manager,registry)=fixture()
+        val source=temp.resolve("receipt-source").createDirectory().also {it.resolve("world.dat").writeText("new world")}
+        base.resolve("world.dat").writeText("old world")
+        val manifest=FileInventory.collect(source).let {(f,d)->RunnerFileManifest(f,d)}
+        val plan=transfer.begin("runner","instance",manifest,"import",1)
+        transfer.upload("runner","instance",plan.transferId,"world.dat",0,"new world".toByteArray())
+        val before=FileInventory.collect(base).let {(f,d)->RunnerFileManifest(f,d)}
+        DeltaTransfer.apply(base,temp.resolve("instance/runner-transfer/${plan.transferId}"),before,manifest,temp.resolve("instance/runner-backups"))
+        temp.resolve("instance/remote-lease").writeText("runner")
+        val restarted=RunnerTransfer(manager,registry)
+        val resumed=restarted.begin("runner","instance",manifest,"import",1)
+        assertEquals(plan.transferId,resumed.transferId);assertTrue(resumed.changedFiles.isEmpty())
+        assertEquals("COMPLETE",restarted.transferState("runner","instance",plan.transferId))
+        verify(manager).remoteCommitted("instance","runner","import")
+        assertEquals("new world",base.resolve("world.dat").readText())
+    }
+
 }
