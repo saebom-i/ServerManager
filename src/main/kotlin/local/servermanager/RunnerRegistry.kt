@@ -25,7 +25,7 @@ import kotlin.io.path.*
 data class RunnerDevice(val id:String,val name:String,val platform:String,val registeredBy:String,val publicKey:String,
     val createdAt:String,var version:String="unknown",var enabled:Boolean=true,var allowedInstanceIds:Set<String> = emptySet())
 data class RunnerView(val id:String,val name:String,val platform:String,val registeredBy:String,val createdAt:String,
-    val version:String,val enabled:Boolean,val allowedInstanceIds:Set<String>,val online:Boolean,val lastSeen:String?,val update:RunnerUpdateStatus?=null,val remoteUpdateSupported:Boolean=false)
+    val version:String,val enabled:Boolean,val allowedInstanceIds:Set<String>,val online:Boolean,val lastSeen:String?,val update:RunnerUpdateStatus?=null,val remoteUpdateSupported:Boolean=false,val registeredByName:String="",val canGrant:Boolean=false)
 data class RunnerPairRequest(val code:String,val publicKey:String,val platform:String,val version:String)
 data class RunnerEnrollmentRequest(val name:String)
 private data class PendingRunner(val codeHash:String,val userId:String,val name:String,val expiresAt:Long)
@@ -105,7 +105,7 @@ class RunnerRegistry(private val manager:ServerManager,private val auth:AuthStor
     @Synchronized fun views(userId:String):List<RunnerView> {
         val user=auth.account(userId) ?: return emptyList()
         return devices.values.filter { user.managesAllServers() || it.registeredBy==userId || it.allowedInstanceIds.any { id -> user.permissions[id]=="ADMIN" } }
-            .map { RunnerView(it.id,it.name,it.platform,it.registeredBy,it.createdAt,it.version,it.enabled,it.allowedInstanceIds,online(it.id),heartbeat[it.id]?.let { ms->Instant.ofEpochMilli(ms).toString() },updates[it.id],remoteUpdateSupported(it.id)) }
+            .map { RunnerView(it.id,it.name,it.platform,it.registeredBy,it.createdAt,it.version,it.enabled,it.allowedInstanceIds,online(it.id),heartbeat[it.id]?.let { ms->Instant.ofEpochMilli(ms).toString() },updates[it.id],remoteUpdateSupported(it.id),auth.account(it.registeredBy)?.displayName ?: "삭제된 계정",(it.registeredBy==userId || user.managesAllServers())) }
     }
     @Synchronized fun connected(id:String){updates.remove(id)}
     @Synchronized fun remoteUpdateSupported(id:String)=active(id)!=null && updates[id]?.phase?.let {it!="UNSUPPORTED"}==true
@@ -121,7 +121,8 @@ class RunnerRegistry(private val manager:ServerManager,private val auth:AuthStor
     }
     @Synchronized fun allow(userId:String,id:String,instanceId:String,allowed:Boolean) {
         val device=devices[id] ?: error("실행기를 찾을 수 없습니다")
-        require(device.registeredBy==userId && auth.account(userId)?.enabled==true) { "기기 등록자만 서버별 사용을 허용할 수 있습니다" }
+        val user=auth.account(userId)
+        require(user?.enabled==true && (device.registeredBy==userId || user.managesAllServers())) { "기기 등록자·전체 관리자·소유자만 서버별 사용을 허용할 수 있습니다" }
         manager.instance(instanceId)
         require(auth.allowed(userId,instanceId,false)) { "접근할 수 있는 서버만 실행기에 허용할 수 있습니다" }
         if(!allowed && manager.instance(instanceId).runnerId==id)

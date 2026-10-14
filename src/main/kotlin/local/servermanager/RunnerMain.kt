@@ -342,21 +342,23 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
                 if(serverDir(id).resolve("server.properties").exists())folders.checkWorldStopped(id)
             }}}!!
     private fun workspace(id:String,requestId:String,raw:String) {
-        var reserved=false
-        try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {
-            synchronized(lifecycle){updateCheckpoint();check(preparing.add(id)) {"실행기 작업이 진행 중입니다"};reserved=true}
-            val request=mapper.readValue<WorkspaceRequest>(raw);val instance=request.config
-            require(instance.id==id && instance.runnerId==identity.id && !instance.syncEnabled() && instance.diagnosticSession==null)
-            check(!instanceRoot(id).resolve("folder-import.pending").exists() && id !in uploading) {"기존 파일 인계를 완료하세요"}
-            configs[id]=instance;instanceRoot(id).createDirectories();atomicText(instanceRoot(id).resolve("instance.json"),mapper.writeValueAsString(instance));serverDir(id).createDirectories()
-            val service=workspaceService(id)
-            val result=mapper.writeValueAsString(service.execute(request));require(result.length<=200*1024);send(RunnerMessage("workspace-result",id,"OK",token=requestId,detail=result))
-        }}catch(e:Exception){send(RunnerMessage("workspace-result",id,"ERROR",token=requestId,detail=e.message?.take(500) ?: "파일 작업 실패"))}
-        finally{if(reserved)preparing.remove(id)}
+        val response=try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {
+            var reserved=false
+            try {
+                synchronized(lifecycle){updateCheckpoint();check(preparing.add(id)) {"실행기 작업이 진행 중입니다"};reserved=true}
+                val request=mapper.readValue<WorkspaceRequest>(raw);val instance=request.config
+                require(instance.id==id && instance.runnerId==identity.id && !instance.syncEnabled() && instance.diagnosticSession==null)
+                check(!instanceRoot(id).resolve("folder-import.pending").exists() && id !in uploading) {"기존 파일 인계를 완료하세요"}
+                configs[id]=instance;instanceRoot(id).createDirectories();atomicText(instanceRoot(id).resolve("instance.json"),mapper.writeValueAsString(instance));serverDir(id).createDirectories()
+                val result=mapper.writeValueAsString(workspaceService(id).execute(request));require(result.length<=200*1024)
+                RunnerMessage("workspace-result",id,"OK",token=requestId,detail=result)
+            }finally{if(reserved)preparing.remove(id)}
+        }}catch(e:Exception){RunnerMessage("workspace-result",id,"ERROR",token=requestId,detail=e.message?.take(500) ?: "파일 작업 실패")}
+        send(response)
     }
     private fun installServer(id:String,ticket:String,raw:String) {
         var reserved=false
-        try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {
+        try {synchronized(operationLocks.computeIfAbsent(id){Any()}) {try {
             synchronized(lifecycle){updateCheckpoint();check(preparing.add(id));reserved=true}
             require(UUID.fromString(ticket).toString()==ticket)
             val instance=mapper.readValue<Instance>(raw);require(instance.id==id && instance.runnerId==identity.id && instance.diagnosticSession==null)
@@ -378,8 +380,7 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity,upda
             }
             val result=RunnerMessage("install-result",id,"OK",token=ticket,detail="실행기에서 ${instance.loader} ${instance.loaderVersion} 설치 완료")
             atomicText(instanceRoot(id).resolve("install-result.json"),mapper.writeValueAsString(result));send(result)
-        }}catch(e:Exception){if(e is RetryTransfer && instanceRoot(id).resolve("install-sync.pending").exists()){send(RunnerMessage("import-progress",id,token=ticket,detail=mapper.writeValueAsString(FolderImportProgress("RETRYING",message="설치는 완료됐습니다. 연결 복구 후 변경 파일 인계를 재개합니다"))));return};val result=RunnerMessage("install-result",id,"ERROR",token=ticket,detail=e.message?.take(500) ?: "실행기 설치 실패");atomicText(instanceRoot(id).resolve("install-result.json"),mapper.writeValueAsString(result));send(result)}
-        finally{if(reserved)preparing.remove(id)}
+        }finally{if(reserved)preparing.remove(id)}}}catch(e:Exception){if(e is RetryTransfer && instanceRoot(id).resolve("install-sync.pending").exists()){send(RunnerMessage("import-progress",id,token=ticket,detail=mapper.writeValueAsString(FolderImportProgress("RETRYING",message="설치는 완료됐습니다. 연결 복구 후 변경 파일 인계를 재개합니다"))));return};val result=RunnerMessage("install-result",id,"ERROR",token=ticket,detail=e.message?.take(500) ?: "실행기 설치 실패");atomicText(instanceRoot(id).resolve("install-result.json"),mapper.writeValueAsString(result));send(result)}
     }
     private fun beginStart(id:String,rawConfig:String)=synchronized(operationLocks.computeIfAbsent(id){Any()}) {
         var spawned=false

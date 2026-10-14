@@ -72,8 +72,9 @@ class Api(private val manager: ServerManager,private val accounts:AuthStore,priv
     }
     @GetMapping("/instances/{id}/download") fun download(@PathVariable id:String,@RequestParam path:String):ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody> {
         val remote=remoteFiles.remote(id);val local=if(remote)null else manager.path(id,path).also {require(it.isRegularFile())}
+        val size=if(remote)remoteFiles.size(id,path) else local!!.fileSize()
         val body=org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody {out->if(remote)remoteFiles.download(id,path,out) else local!!.inputStream().use {it.copyTo(out,64*1024)}}
-        return ResponseEntity.ok().contentType(MediaType.APPLICATION_OCTET_STREAM).header(HttpHeaders.CONTENT_DISPOSITION,org.springframework.http.ContentDisposition.attachment().filename(Path.of(path).fileName.toString(),Charsets.UTF_8).build().toString()).body(body)
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_OCTET_STREAM).contentLength(size).header(HttpHeaders.CONTENT_DISPOSITION,org.springframework.http.ContentDisposition.attachment().filename(Path.of(path).fileName.toString(),Charsets.UTF_8).build().toString()).body(body)
     }
     @GetMapping("/instances/{id}/logs") fun logs(@PathVariable id: String): ResponseEntity<FileSystemResource> {
         manager.instance(id)

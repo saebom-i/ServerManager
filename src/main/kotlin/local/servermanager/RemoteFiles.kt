@@ -18,6 +18,7 @@ class RemoteFiles(private val manager:ServerManager) {
         do {val page=call(id,"LIST",path,offset);result+=page.path("entries").map {mapper.treeToValue(it,FileEntry::class.java)};check(result.size<=100000);val next=page.path("next");if(next.isNull || next.isMissingNode)break;check(next.asLong()>offset);offset=next.asLong()}while(true)
         return result.sortedWith(compareBy<FileEntry>{!it.directory}.thenBy {it.name})
     }
+    fun size(id:String,path:String):Long=call(id,"STAT",path).path("size").asLong().also {require(it>=0)}
     fun download(id:String,path:String,out:OutputStream,limit:Long=Long.MAX_VALUE) {
         val stat=call(id,"STAT",path);val size=stat.path("size").asLong(-1);require(size in 0..limit) {"파일 크기 제한을 초과했습니다"};val revision=stat.path("revision").asText();var offset=0L
         while(offset<size){val part=call(id,"READ",path,offset,revision=revision);val bytes=java.util.Base64.getDecoder().decode(part.path("data").asText());check(bytes.isNotEmpty() && bytes.size<=RunnerWorkspace.CHUNK && bytes.size<=size-offset);out.write(bytes);offset+=bytes.size}

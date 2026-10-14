@@ -11,7 +11,7 @@ import kotlin.test.*
 
 class RunnerRegistryTest {
     @TempDir lateinit var temp:Path
-    @Test fun `invited viewer can register runner but only its registrant grants each server`() {
+    @Test fun `registrant owner and global administrator grant servers while instance admin cannot`() {
         AuthStore(temp.resolve("security")).use { auth ->
             auth.invite("viewer",mapOf("a" to "VIEWER"))
             auth.invite("admin",mapOf("a" to "ADMIN"))
@@ -31,6 +31,9 @@ class RunnerRegistryTest {
             assertFailsWith<IllegalArgumentException> { registry.allow(admin.id,runner.id,"a",true) }
             `when`(manager.instance("private")).thenReturn(Instance("private","private",loaderVersion="21.1.252",port=25566,memoryMb=512,javaPath="java"))
             assertFailsWith<IllegalArgumentException> { registry.allow(viewer.id,runner.id,"private",true) }
+            val globalId=auth.invitation(auth.invite("global",emptyMap(),AccountRole.ADMIN))!!.userId
+            registry.allow(globalId,runner.id,"a",true);assertTrue(registry.canAssign(globalId,"a",runner.id));assertTrue(registry.views(globalId).single().canGrant)
+            registry.allow(auth.accounts().first {it.owner}.id,runner.id,"a",false)
             registry.allow(viewer.id,runner.id,"a",true)
             assertTrue(registry.canAssign(admin.id,"a",runner.id))
             assertFalse(registry.canAssign(viewer.id,"a",runner.id))
