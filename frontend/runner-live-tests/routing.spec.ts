@@ -58,6 +58,8 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
     await rm(originalFolder+'/server-manager-runtime.json');
     await writeFile(originalFolder+'/original-folder-proof.txt','must remain in the original folder\n');
     await writeFile(originalFolder+'/resume-proof.bin',Buffer.alloc(64*1024*1024,37));
+    await mkdir(originalFolder+'/resume-many');
+    for(let n=0;n<512;n++)await writeFile(originalFolder+`/resume-many/${n}.dat`,Buffer.alloc(65536,n%251));
     await mkdir(runnerHome+'/instances/'+id,{recursive:true});
     await writeFile(runnerHome+'/instances/'+id+'/server-folder.properties',`path=${await realpath(originalFolder)}\ninitial=true\njar=custom-vanilla.jar\nrequiredJava=21\n`);
    }
@@ -74,7 +76,11 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   await api('/instances/'+ids[0]+'/import-folder','POST');
   const cacheRoot=home+'/profiles/'+ids[0]+'/runner-transfer';let resumedId='';
   await expect.poll(async()=>{try{const names=await readdir(cacheRoot);resumedId=names.find(n=>/^[a-f0-9-]{36}$/.test(n))||'';if(!resumedId)return false;const files=await readdir(cacheRoot+'/'+resumedId,{recursive:true});for(const file of files){const info=await stat(cacheRoot+'/'+resumedId+'/'+file);if(info.isFile()&&info.size>=4*1024*1024)return true;}return false;}catch{return false;}},{timeout:120000,intervals:[10,20,30]}).toBe(true);
-  await rotateFixtureRunnerSession(runnerHomes[0]);await waitState(ids[0],'STOPPED');
+  // Suspend only the disposable runner before any Minecraft JVM exists so that
+  // authentication is replaced while its upload still has pending requests.
+  runners[0].kill('SIGSTOP');
+  try {await rotateFixtureRunnerSession(runnerHomes[0]);} finally {runners[0].kill('SIGCONT');}
+  await waitState(ids[0],'STOPPED');
   await access(home+'/profiles/'+ids[0]+'/transfer-receipts/'+resumedId+'.json');
   const audit=(await readFile(home+'/profiles/security/audit.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line));
   expect(audit.filter((e:any)=>e.action==='POST /api/runners/transfer/'+ids[0]+'/begin').length).toBeGreaterThanOrEqual(2);
