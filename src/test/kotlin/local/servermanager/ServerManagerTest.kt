@@ -34,6 +34,42 @@ class ServerManagerTest {
         Files.createSymbolicLink(manager.serverDir(id).resolve("escape"),manager.root)
         assertFailsWith<IllegalArgumentException> { manager.path(id,"escape/secret") }
     }
+    @Test fun `streamed upload uses bounded reads and incomplete input never replaces original`() {
+        val id=instance();manager.write(id,"config.txt","original".toByteArray())
+        assertFailsWith<IllegalArgumentException> {"oversize".byteInputStream().use {manager.writeStream(id,"config.txt",it,limit=3)}}
+        assertEquals("original",manager.text(id,"config.txt")["content"])
+        val broken=object:java.io.InputStream() {
+            override fun read():Int=error("single-byte read not expected")
+            override fun read(b:ByteArray,off:Int,len:Int):Int=throw java.io.IOException("interrupted upload")
+        }
+        assertFailsWith<java.io.IOException>{manager.writeStream(id,"config.txt",broken)}
+        assertEquals("original",manager.text(id,"config.txt")["content"])
+        var remaining=3*1024*1024
+        val generated=object:java.io.InputStream() {
+            override fun read():Int=error("single-byte read not expected")
+            override fun readAllBytes():ByteArray=error("must not buffer the upload")
+            override fun read(b:ByteArray,off:Int,len:Int):Int {
+                check(len<=64*1024);if(remaining==0)return -1
+                val n=minOf(len,remaining);b.fill(9,off,off+n);remaining-=n;return n
+            }
+        }
+        manager.writeStream(id,"large.bin",generated)
+        assertEquals(3L*1024*1024,manager.serverDir(id).resolve("large.bin").fileSize())
+        assertTrue(manager.serverDir(id).listDirectoryEntries(".save-*").isEmpty())
+        val revision=manager.text(id,"config.txt").getValue("revision")
+        manager.writeStream(id,"config.txt",java.io.ByteArrayInputStream(ByteArray(3*1024*1024)))
+        assertFailsWith<IllegalStateException>{manager.write(id,"config.txt","stale".toByteArray(),revision)}
+    }
+    @Test fun `manager startup recovers an interrupted transfer before exposing its server`() {
+        val id=instance();manager.write(id,"level.dat","original".toByteArray())
+        val base=manager.serverDir(id);val before=FileInventory.collect(base).let {(f,d)->RunnerFileManifest(f,d)}
+        val stage=manager.root.resolve(id).resolve("interrupted-upload").createDirectory()
+        stage.resolve("level.dat").writeText("new")
+        val after=before.copy(files=before.files+("level.dat" to CloudFile(FileInventory.digest(stage.resolve("level.dat")),3)))
+        assertFailsWith<Error> {DeltaTransfer.apply(base,stage,before,after,manager.root.resolve(id).resolve("runner-backups"),afterStep={if(it=="install:level.dat")throw Error("simulated process exit")})}
+        val restarted=ServerManager()
+        try {assertEquals("original",restarted.text(id,"level.dat")["content"])} finally {restarted.shutdown()}
+    }
     @Test fun `memory validation follows actual host capacity`() {
         val cap=manager.capacity()
         assertEquals(cap.totalMb-cap.reservedMb,cap.maxHeapMb)

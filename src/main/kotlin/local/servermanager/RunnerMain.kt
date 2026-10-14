@@ -368,18 +368,20 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
         val response=http("GET","/api/runners/transfer/$id/manifest")
         check(response.statusCode()==200) { "서버 파일 목록을 받지 못했습니다: HTTP ${response.statusCode()}" }
         val manifest=mapper.readValue<RunnerFileManifest>(response.body())
-        val root=instanceRoot(id)
+        DeltaTransfer.validate(manifest,serverDir(id))
         val stage=folders.stage(id)
         try {
             manifest.directories.forEach { FileInventory.safePath(stage,it).createDirectories() }
-            val existing=serverDir(id).takeIf { it.exists() }?.let { FileInventory.collect(it) {count,bytes->progress(FolderImportProgress("SCANNING",count,bytes))}.first }.orEmpty()
+            val before=serverDir(id).takeIf {it.exists()}?.let {base->
+                FileInventory.collect(base) {count,bytes->progress(FolderImportProgress("SCANNING",count,bytes))}.let {(f,d)->RunnerFileManifest(f,d)}
+            } ?: RunnerFileManifest(emptyMap(),emptySet())
+            val existing=before.files
             val changed=manifest.files.filter {(path,file)->existing[path]!=file};val total=changed.values.sumOf {it.size};var downloaded=0L;var completed=0
             progress(FolderImportProgress(if(changed.isEmpty())"VERIFYING" else "UPLOADING",0,0,changed.size,total,"동일한 파일은 재사용하고 변경 파일만 다운로드합니다"),true)
             manifest.files.forEach { (relative,file) ->
                 val target=FileInventory.safePath(stage,relative)
                 target.parent.createDirectories()
-                if(existing[relative]==file) Files.copy(FileInventory.safePath(serverDir(id),relative),target)
-                else {
+                if(existing[relative]!=file) {
                     target.outputStream().use { output ->
                         var offset=0L
                         while(offset<file.size) {
@@ -391,15 +393,11 @@ class RunnerAgent(private val home:Path,private val identity:RunnerIdentity):Web
                     }
                     completed++
                 }
-                check(target.fileSize()==file.size && FileInventory.digest(target)==file.sha256) { "서버 파일 해시 불일치: $relative" }
             }
             progress(FolderImportProgress("VERIFYING",completed,downloaded,changed.size,total,"실행기에서 검증한 파일을 반영하고 있습니다"),true)
             val current=serverDir(id)
-            if(current.exists()) {
-                val backup=folders.backup(id)
-                Files.move(current,backup,ATOMIC_MOVE)
-                try { Files.move(stage,current,ATOMIC_MOVE) } catch(e:Exception) { Files.move(backup,current,ATOMIC_MOVE);throw e }
-            } else Files.move(stage,current,ATOMIC_MOVE)
+            current.createDirectories()
+            DeltaTransfer.apply(current,stage,before,manifest,folders.transferHistory(id))
             if(folders.custom(id))folders.published(id,manifest)
         } finally { if(stage.exists())stage.toFile().deleteRecursively() }
     }

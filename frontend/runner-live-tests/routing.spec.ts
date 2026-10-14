@@ -97,7 +97,7 @@ test('real HTTPS manager, two signed runner sessions, shared TCP routing, safe f
   await api('/instances/'+ids[0]+'/text','PUT',{path:'central-edit.txt',content:'central change after first upload'});
   await api('/instances/'+ids[0]+'/start','POST');await waitState(ids[0],'RUNNING');
   expect(await readFile(originalFolder+'/central-edit.txt','utf8')).toContain('central change');
-  expect((await readdir(home)).some(name=>name.startsWith('.servermanager-backup-'+ids[0]))).toBe(true);
+  expect((await readdir(home+'/.servermanager-history-'+ids[0])).some(name=>name.startsWith('delta-'))).toBe(true);
   await api('/instances/'+ids[0]+'/stop','POST');await waitState(ids[0],'STOPPED');
   expect(JSON.stringify((await query(shared,'beta.server.example.com')).description)).toContain('Fixture-1');
   await expect(query(shared,'alpha.server.example.com')).rejects.toThrow();

@@ -124,6 +124,8 @@ class ServerManager {
         root.createDirectories()
         Files.list(root).use { dirs -> dirs.filter { it.resolve("instance.json").exists() }.forEach {
             val instance: Instance = mapper.readValue(it.resolve("instance.json").readText())
+            serverDir(instance.id).createDirectories()
+            DeltaTransfer.recover(serverDir(instance.id),root.resolve(instance.id).resolve("runner-backups"))
             instances[instance.id] = instance
             runtimes[instance.id] = RuntimeState().apply { state = when { root.resolve(instance.id).resolve("remote-lease").exists() -> "UNKNOWN"; root.resolve(instance.id).resolve("import.pending").exists() -> "IMPORT_FAILED"; root.resolve(instance.id).resolve("installed.ok").exists() -> "STOPPED"; else -> "NEW" } }
         } }
@@ -537,18 +539,33 @@ class ServerManager {
     }
     fun text(id: String,relative: String): Map<String,String> {
         val p=path(id,relative); require(p.isRegularFile() && p.fileSize()<=2*1024*1024) { "2 MiB 이하 텍스트 파일만 편집할 수 있습니다" }
-        val bytes=p.readBytes(); require(!bytes.contains(0.toByte())) { "바이너리 파일은 다운로드하세요" }
+        val bytes=p.inputStream().use {it.readNBytes(2*1024*1024+1)}
+        require(bytes.size<=2*1024*1024) {"2 MiB 이하 텍스트 파일만 편집할 수 있습니다"}
+        require(!bytes.contains(0.toByte())) { "바이너리 파일은 다운로드하세요" }
         return mapOf("content" to bytes.toString(Charsets.UTF_8), "revision" to digest(bytes))
     }
     private fun digest(bytes: ByteArray)=java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-    fun write(id: String,relative: String,bytes: ByteArray,revision: String?=null) { val r=runtime(id); synchronized(r) {
-        checkIdle(r); val p=path(id,relative); require(p!=serverDir(id)) { "파일 경로를 지정하세요" }
-        if(revision!=null) check(p.exists() && digest(p.readBytes())==revision) { "파일이 변경되었습니다. 다시 열어주세요" }
-        p.parent.createDirectories()
-        if(p.exists()) { val backup=root.resolve(id).resolve("backups").resolve(UUID.randomUUID().toString()+"-"+p.name); backup.parent.createDirectories(); Files.copy(p,backup) }
-        val tmp=Files.createTempFile(p.parent,".save-",".tmp")
-        try { tmp.writeBytes(bytes); Files.move(tmp,p,StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE) } finally { tmp.deleteIfExists() }
-    } }
+    fun write(id:String,relative:String,bytes:ByteArray,revision:String?=null) {
+        require(bytes.size<=2*1024*1024) {"텍스트 저장은 2 MiB까지 가능합니다. 큰 파일은 업로드하세요"}
+        bytes.inputStream().use {writeStream(id,relative,it,revision,2L*1024*1024)}
+    }
+    fun writeStream(id:String,relative:String,input:java.io.InputStream,revision:String?=null,limit:Long=256L*1024*1024) {
+        require(limit in 0..256L*1024*1024)
+        val r=runtime(id);synchronized(r) {
+            checkIdle(r);val p=path(id,relative);require(p!=serverDir(id)) {"파일 경로를 지정하세요"}
+            if(revision!=null)check(p.isRegularFile() && FileInventory.digest(p)==revision) {"파일이 변경되었습니다. 다시 열어주세요"}
+            p.parent.createDirectories()
+            val tmp=Files.createTempFile(p.parent,".save-",".tmp")
+            try {
+                tmp.outputStream().use {output->
+                    val buffer=ByteArray(64*1024);var total=0L
+                    while(true) {val n=input.read(buffer);if(n<0)break;total+=n;require(total<=limit) {"파일 크기 제한을 초과했습니다"};output.write(buffer,0,n)}
+                }
+                if(p.exists()) {val backup=root.resolve(id).resolve("backups").resolve(UUID.randomUUID().toString()+"-"+p.name);backup.parent.createDirectories();Files.copy(p,backup)}
+                Files.move(tmp,p,StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE)
+            } finally {tmp.deleteIfExists()}
+        }
+    }
     fun mkdir(id: String,relative: String) { val r=runtime(id); synchronized(r) { checkIdle(r); path(id,relative).createDirectories() } }
     fun move(id: String,from: String,to: String) { val r=runtime(id); synchronized(r) { checkIdle(r); val source=path(id,from); val target=path(id,to); require(source!=serverDir(id) && !target.exists()) { "대상 경로를 확인하세요" }; Files.move(source,target) } }
     fun delete(id: String,relative: String) { val r=runtime(id); synchronized(r) { checkIdle(r); val p=path(id,relative); require(p!=serverDir(id)) { "서버 루트는 삭제할 수 없습니다" }; val trash=root.resolve(id).resolve("trash"); trash.createDirectories(); Files.move(p,trash.resolve(UUID.randomUUID().toString()+"-"+p.name)) } }

@@ -37,10 +37,14 @@ class RunnerFolders(private val home:Path) {
         try {temp.outputStream().use {properties.store(it,"Local server folder")};Files.move(temp,file,java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING)}
         finally {temp.deleteIfExists()}
     }
+    fun transferHistory(id:String):Path = if(custom(id)) directory(id).resolveSibling(".servermanager-history-$id")
+        else home.resolve("instances/$id/transfer-backups")
+    fun recover(id:String)=DeltaTransfer.recover(directory(id),transferHistory(id))
     fun checkStopped(id:String,onProgress:(Int,Long)->Unit={_,_->}) {
-        if(!custom(id))return
+        if(!custom(id)) {if(directory(id).exists())recover(id);return}
         val base=directory(id)
         checkWorldStopped(id)
+        recover(id)
         require(base.resolve("server.properties").isRegularFile()) { "server.properties가 있는 실제 마크 서버 폴더를 선택하세요" }
         val (files,dirs)=FileInventory.collect(base,onProgress) // Reject links/special files before any pull, replacement or start.
         if(!initial(id)) check(config(id)!!.getProperty("fingerprint")==fingerprint(RunnerFileManifest(files,dirs))) { "원래 폴더에 외부 변경이 있습니다. 자동 덮어쓰기를 중단했습니다. 실행기 설치 창에서 폴더를 다시 등록하면 로컬 파일을 원본으로 사용합니다" }

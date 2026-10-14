@@ -10,7 +10,8 @@ import kotlin.test.*
 class RunnerTransferTest {
     @TempDir lateinit var temp:Path
 
-    private fun fixture():Triple<RunnerTransfer,Path,ServerManager> {
+    private data class Fixture(val transfer:RunnerTransfer,val base:Path,val manager:ServerManager,val registry:RunnerRegistry)
+    private fun fixture():Fixture {
         val base=temp.resolve("instance/server").also { it.createDirectories() }
         val manager=mock(ServerManager::class.java)
         val registry=mock(RunnerRegistry::class.java)
@@ -18,7 +19,7 @@ class RunnerTransferTest {
         `when`(manager.serverDir("instance")).thenReturn(base)
         `when`(manager.instance("instance")).thenReturn(Instance("instance","test",loaderVersion="21.1.252",port=25565,memoryMb=512,javaPath="java",runnerId="runner"))
         `when`(registry.active("runner")).thenReturn(RunnerDevice("runner","Mac","MAC","user","key","now",allowedInstanceIds=setOf("instance")))
-        return Triple(RunnerTransfer(manager,registry),base,manager)
+        return Fixture(RunnerTransfer(manager,registry),base,manager,registry)
     }
 
     @Test fun `only changed file chunks are requested and deletion is preserved`() {
@@ -64,8 +65,33 @@ class RunnerTransferTest {
         transfer.upload("runner","instance",plan.transferId,"imported.dat",0,"existing world".toByteArray())
         transfer.commit("runner","instance",plan.transferId)
         assertEquals("existing world",base.resolve("imported.dat").readText())
-        val backup=temp.resolve("instance/runner-backups").listDirectoryEntries().single();assertEquals("original",backup.resolve("old-world.dat").readText())
+        val backup=temp.resolve("instance/runner-backups").listDirectoryEntries().single();assertEquals("original",backup.resolve("files/old-world.dat").readText())
         verify(manager).remoteCommitted("instance","runner",request)
         verify(manager,never()).start(anyString())
+    }
+    @Test fun `a busy commit does not block a different runner instance upload`() {
+        val (transfer,base,manager,registry)=fixture()
+        val second=temp.resolve("second/server").also {it.createDirectories()}
+        `when`(manager.serverDir("second")).thenReturn(second)
+        `when`(manager.instance("second")).thenReturn(Instance("second","second",loaderVersion="21.1.252",port=25565,memoryMb=512,javaPath="java",runnerId="runner"))
+        `when`(registry.active("runner")).thenReturn(RunnerDevice("runner","Mac","MAC","user","key","now",allowedInstanceIds=setOf("instance","second")))
+        val wanted=temp.resolve("wanted").createDirectory().also {it.resolve("data").writeText("new")}
+        val manifest=FileInventory.collect(wanted).let {(f,d)->RunnerFileManifest(f,d)}
+        val first=transfer.begin("runner","instance",manifest);val next=transfer.begin("runner","second",manifest)
+        transfer.upload("runner","instance",first.transferId,"data",0,"new".toByteArray())
+        val entered=java.util.concurrent.CountDownLatch(1);val release=java.util.concurrent.CountDownLatch(1)
+        doAnswer {call->
+            if(call.getArgument<String>(0)=="instance" && call.getArgument<FolderImportProgress>(2).phase=="VERIFYING") {entered.countDown();check(release.await(10,java.util.concurrent.TimeUnit.SECONDS))}
+            null
+        }.`when`(manager).fileTransferProgress(anyString(),anyString(),any(FolderImportProgress::class.java) ?: FolderImportProgress("VERIFYING"))
+        val pool=java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val commit=pool.submit {transfer.commit("runner","instance",first.transferId)}
+            assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS))
+            pool.submit {transfer.upload("runner","second",next.transferId,"data",0,"new".toByteArray())}.get(3,java.util.concurrent.TimeUnit.SECONDS)
+            release.countDown();commit.get(5,java.util.concurrent.TimeUnit.SECONDS)
+            transfer.commit("runner","second",next.transferId)
+            assertEquals("new",base.resolve("data").readText());assertEquals("new",second.resolve("data").readText())
+        } finally {release.countDown();pool.shutdown();assertTrue(pool.awaitTermination(10,java.util.concurrent.TimeUnit.SECONDS))}
     }
 }

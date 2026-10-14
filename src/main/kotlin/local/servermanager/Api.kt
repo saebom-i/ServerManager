@@ -63,7 +63,7 @@ class Api(private val manager: ServerManager,private val accounts:AuthStore,priv
     @DeleteMapping("/instances/{id}/files") fun delete(@PathVariable id: String,@RequestParam path: String)=manager.delete(id,path)
     @PostMapping("/instances/{id}/upload") fun upload(@PathVariable id: String,@RequestParam(defaultValue="") path: String,@RequestParam file: MultipartFile) {
         val name=Path.of(file.originalFilename ?: "upload.bin").fileName.toString()
-        manager.write(id,if(path.isBlank()) name else "$path/$name",file.bytes)
+        file.inputStream.use {manager.writeStream(id,if(path.isBlank()) name else "$path/$name",it)}
     }
     @GetMapping("/instances/{id}/download") fun download(@PathVariable id: String,@RequestParam path: String): ResponseEntity<FileSystemResource> {
         val file=manager.path(id,path); require(file.isRegularFile()) { "파일이 아닙니다" }
